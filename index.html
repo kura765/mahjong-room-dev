@@ -51,10 +51,18 @@ function fail(e){notify(e?.message||String(e))}
 function resetRoom(){current=null;revision=null;show('currentBox',false)}
 function resetAuth(){user=null;show('roomBox',false);resetRoom();$('authStatus').textContent='未ログイン'}
 function validateConfig(){
- const url=$('projectUrl').value.trim(),key=$('publicKey').value.trim();
- if(!/^https:\/\/[a-z0-9-]+\.supabase\.co\/?$/i.test(url))throw Error('Project URLの形式を確認してください。');
+ const raw=$('projectUrl').value.trim(),key=$('publicKey').value.trim();
+ let parsed;
+ try{parsed=new URL(raw)}catch(e){
+  throw Error('Project URLが読み取れません。Supabaseの「Settings → Data API」にあるProject URLをコピーしてください。例：https://xxxxx.supabase.co');
+ }
+ if(parsed.protocol!=='https:'||!parsed.hostname.endsWith('.supabase.co')||
+    parsed.hostname==='.supabase.co'||parsed.username||parsed.password||
+    (parsed.pathname!=='/'&&parsed.pathname!=='')||parsed.search||parsed.hash){
+  throw Error('Project URLには「https://xxxxx.supabase.co」の形式を入力してください。supabase.com/dashboard/... は管理画面のURLなので使用できません。');
+ }
  if(!key||/service_role|sb_secret_/i.test(key))throw Error('秘密鍵は使用できません。publishable / anonキーのみ入力してください。');
- return {url:url.replace(/\/$/,''),key};
+ return {url:parsed.origin,key};
 }
 async function connect(){
  try{
