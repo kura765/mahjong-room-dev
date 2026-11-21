@@ -53,14 +53,14 @@ function resetAuth(){user=null;show('roomBox',false);resetRoom();$('authStatus')
 function validateConfig(){
  // Supabase's Data API page may copy a REST endpoint ending in /rest/v1.
  // The SDK requires the base project origin; normalize that endpoint automatically.
- const raw=$('projectUrl').value.trim().replace(/^[\\s"'\u201c\u201d\u2018\u2019]+|[\\s"'\u201c\u201d\u2018\u2019]+$/g,'');
+ const raw=$('projectUrl').value.trim().replace(/^[\s"'\u201c\u201d\u2018\u2019]+|[\s"'\u201c\u201d\u2018\u2019]+$/g,'');
  const key=$('publicKey').value.trim();
  let parsed;
  try{parsed=new URL(raw)}catch(e){
   throw Error('URLを読み取れません。Data API画面の「API URL → Copy」でコピーし直してください。');
  }
  const host=parsed.hostname.toLowerCase();
- if(parsed.protocol!=='https:'||!/^([a-z0-9-]+)\\.supabase\\.co$/.test(host)||
+ if(parsed.protocol!=='https:'||!/^([a-z0-9-]+)\.supabase\.co$/.test(host)||
     parsed.username||parsed.password||parsed.port||
     !['','/','/rest/v1','/rest/v1/'].includes(parsed.pathname)||
     parsed.search||parsed.hash){
