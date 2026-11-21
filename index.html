@@ -23,19 +23,35 @@ button.ghost{background:#e9efff;color:#2155bb}button:disabled{opacity:.5;cursor:
 <label for="publicKey">Publishable key / anon key</label><input id="publicKey" placeholder="sb_publishable_... または公開anonキー" autocomplete="off">
 <div class="row" style="margin-top:12px"><button id="connectBtn">接続</button><button class="ghost" id="disconnectBtn">接続設定を消す</button></div></section>
 <section id="authBox" class="hide"><h2>作成者ログイン</h2>
-<p id="authStatus" class="muted">未ログイン</p>
+<p id="authStatus" class="muted">未ログイン</p><p class="muted">一度ログインした後は、通常このブラウザにログイン状態が保存されます。</p>
 <label for="email">メールアドレス</label><input id="email" type="email" autocomplete="email" placeholder="example@example.com">
 <div class="row" style="margin-top:12px"><button id="signInBtn">ログイン用リンクを送る</button><button class="ghost" id="signOutBtn">ログアウト</button></div>
+ <div style="margin-top:18px;border-top:1px solid #e2e6ee;padding-top:12px">
+ <h2>メールを送らずにログイン（任意）</h2><p class="muted">初回メールログイン後に下の欄でパスワードを設定できます。設定済みなら次回からメールとパスワードでログインできます。</p>
+ <label for="password">パスワード（12文字以上を推奨）</label><input id="password" type="password" autocomplete="current-password" minlength="8">
+ <div class="row" style="margin-top:10px"><button class="ghost" id="passwordLoginBtn">パスワードでログイン</button><button id="passwordSetBtn" class="hide">ログイン用パスワードを設定・変更</button></div>
+ </div>
 </section>
 <section id="roomBox" class="hide"><h2>テストルーム</h2>
-<p class="muted">最初は架空のテストデータだけを使います。招待・リアルタイム配信はまだ未実装です。</p>
+<p class="muted">最初は架空のテストデータだけを使います。招待コードはSQLを適用すると利用できます。リアルタイム配信はまだ未実装です。</p>
 <label for="roomTitle">部屋名</label><input id="roomTitle" value="動作確認用の半荘">
 <div class="row" style="margin-top:12px"><button id="createRoomBtn">テストルームを作成</button><button class="ghost" id="reloadRoomsBtn">一覧を更新</button></div>
-<div id="roomList"></div></section>
+<div id="roomList"></div>
+ <div style="margin-top:18px;border-top:1px solid #e2e6ee;padding-top:12px">
+ <h2>招待コードで閲覧参加</h2><p class="muted">受け取った64文字のコードを入力してください。参加後は閲覧のみ可能です。</p>
+ <label for="inviteCode">招待コード</label><input id="inviteCode" autocapitalize="off" autocomplete="off" spellcheck="false" placeholder="招待コード">
+ <div class="row" style="margin-top:10px"><button id="joinInviteBtn" class="ghost">閲覧者として参加</button></div>
+ </div></section>
 <section id="currentBox" class="hide"><h2 id="currentTitle">選択中のルーム</h2>
 <div class="meta" id="currentMeta"></div>
 <div class="readonly" id="snapshotView"></div>
 <div class="row" style="margin-top:12px"><button id="incrementBtn">テスト用カウントを＋1</button><button class="ghost" id="refreshBtn">再読み込み</button></div>
+ <div id="inviteOwnerBox" class="hide" style="margin-top:18px;border-top:1px solid #e2e6ee;padding-top:12px">
+ <h2>閲覧者を招待</h2><p class="muted">48時間有効・1回限りの招待コードを発行します。コードを知った人は閲覧者として参加できるため、相手だけに伝えてください。</p>
+ <button id="createInviteBtn" class="ghost">招待コードを発行</button>
+ <label for="generatedInvite">発行したコード（再表示できません）</label><input id="generatedInvite" readonly autocomplete="off" placeholder="発行すると表示されます">
+ <button id="copyInviteBtn" class="ghost" style="margin-top:8px">コードを選択</button>
+ </div>
 <p class="muted">この段階では本物の局結果を編集しません。更新権限と競合対策だけの検証です。</p>
 </section>
 <section><h2>動作状況</h2><div id="message" role="status" aria-live="polite">接続設定を入力すると開始できます。</div></section>
@@ -48,7 +64,7 @@ let client=null,user=null,current=null,revision=null;
 function show(id,on){$(id).classList.toggle('hide',!on)}
 function notify(msg){$('message').textContent=msg}
 function fail(e){notify(e?.message||String(e))}
-function resetRoom(){current=null;revision=null;show('currentBox',false)}
+function resetRoom(){current=null;revision=null;show('currentBox',false);show('inviteOwnerBox',false)}
 function resetAuth(){user=null;show('roomBox',false);resetRoom();$('authStatus').textContent='未ログイン'}
 function validateConfig(){
  // Supabase's Data API page may copy a REST endpoint ending in /rest/v1.
@@ -87,7 +103,7 @@ async function updateAuth(){
  if(error&&error.name!=='AuthSessionMissingError'){fail(error);resetAuth();return}
  user=data?.user||null;
  $('authStatus').textContent=user?'ログイン中：'+(user.email||user.id):'未ログイン';
- show('roomBox',!!user);
+ show('roomBox',!!user);show('passwordSetBtn',!!user);
  if(user){await loadRooms()}else resetRoom();
 }
 async function signIn(){
@@ -96,6 +112,45 @@ async function signIn(){
  const {error}=await client.auth.signInWithOtp({email,options:{emailRedirectTo:location.origin+location.pathname}});
  if(error)return fail(error);
  notify('ログイン用メールを送信しました。メール内のリンクでこのテスト画面に戻ってください。');
+}
+async function passwordLogin(){
+ if(!client)return notify('先に接続してください。');
+ const email=$('email').value.trim(),password=$('password').value;
+ if(!email||!password)return notify('メールアドレスとパスワードを入力してください。');
+ const {error}=await client.auth.signInWithPassword({email,password});
+ if(error)return fail(error);
+ $('password').value='';await updateAuth();notify('パスワードでログインしました。');
+}
+async function setPassword(){
+ if(!client||!user)return notify('先にメールリンクなどでログインしてください。');
+ const password=$('password').value;
+ if(password.length<12)return notify('パスワードは12文字以上で設定してください。');
+ const {error}=await client.auth.updateUser({password});
+ if(error)return fail(error);
+ $('password').value='';notify('パスワードを設定しました。次回からメールなしでログインできます。');
+}
+async function createInvite(){
+ if(!current||current.owner_id!==user?.id)return notify('作成者だけが招待できます。');
+ $('createInviteBtn').disabled=true;
+ try{
+  const {data,error}=await client.rpc('mahjong_create_viewer_invite',{p_room_id:current.id});
+  if(error)throw error;
+  $('generatedInvite').value=data;
+  notify('招待コードを発行しました。信頼できる相手にのみ伝えてください。');
+ }catch(e){fail(e)}finally{$('createInviteBtn').disabled=false}
+}
+async function joinInvite(){
+ if(!client||!user)return notify('先にログインしてください。');
+ const code=$('inviteCode').value.trim().toLowerCase();
+ if(!/^[a-f0-9]{64}$/.test(code))return notify('64文字の招待コードを入力してください。');
+ $('joinInviteBtn').disabled=true;
+ try{
+  const {data,error}=await client.rpc('mahjong_accept_viewer_invite',{p_code:code});
+  if(error)throw error;
+  $('inviteCode').value='';
+  await loadRooms();await openRoom(data);
+  notify('閲覧者として参加しました。');
+ }catch(e){fail(e)}finally{$('joinInviteBtn').disabled=false}
 }
 async function loadRooms(){
  if(!user)return;
@@ -130,6 +185,7 @@ async function openRoom(id){
  current=room;show('currentBox',true);$('currentTitle').textContent=room.title;
  $('currentMeta').textContent=room.owner_id===user.id?'作成者（編集可）':'参加者（閲覧のみ）';
  $('incrementBtn').disabled=room.owner_id!==user.id;
+ show('inviteOwnerBox',room.owner_id===user.id);$('generatedInvite').value='';
  await refresh();
 }
 async function refresh(){
@@ -154,6 +210,11 @@ async function increment(){
 $('connectBtn').onclick=connect;
 $('disconnectBtn').onclick=async()=>{if(client)await client.auth.signOut();client=null;resetAuth();show('authBox',false);localStorage.removeItem(CONFIG_KEY);$('projectUrl').value='';$('publicKey').value='';notify('接続を解除しました。')};
 $('signInBtn').onclick=signIn;
+$('passwordLoginBtn').onclick=passwordLogin;
+$('passwordSetBtn').onclick=setPassword;
+$('createInviteBtn').onclick=createInvite;
+$('joinInviteBtn').onclick=joinInvite;
+$('copyInviteBtn').onclick=()=>{$('generatedInvite').focus();$('generatedInvite').select();notify('コードを選択しました。コピーして相手だけに送ってください。')};
 $('signOutBtn').onclick=async()=>{if(client)await client.auth.signOut();await updateAuth()};
 $('createRoomBtn').onclick=createRoom;
 $('reloadRoomsBtn').onclick=loadRooms;
