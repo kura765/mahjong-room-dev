@@ -51,17 +51,23 @@ function fail(e){notify(e?.message||String(e))}
 function resetRoom(){current=null;revision=null;show('currentBox',false)}
 function resetAuth(){user=null;show('roomBox',false);resetRoom();$('authStatus').textContent='未ログイン'}
 function validateConfig(){
- const raw=$('projectUrl').value.trim(),key=$('publicKey').value.trim();
+ // Supabase's Data API page may copy a REST endpoint ending in /rest/v1.
+ // The SDK requires the base project origin; normalize that endpoint automatically.
+ const raw=$('projectUrl').value.trim().replace(/^[\\s"'\u201c\u201d\u2018\u2019]+|[\\s"'\u201c\u201d\u2018\u2019]+$/g,'');
+ const key=$('publicKey').value.trim();
  let parsed;
  try{parsed=new URL(raw)}catch(e){
-  throw Error('Project URLが読み取れません。Supabaseの「Settings → Data API」にあるProject URLをコピーしてください。例：https://xxxxx.supabase.co');
+  throw Error('URLを読み取れません。Data API画面の「API URL → Copy」でコピーし直してください。');
  }
- if(parsed.protocol!=='https:'||!parsed.hostname.endsWith('.supabase.co')||
-    parsed.hostname==='.supabase.co'||parsed.username||parsed.password||
-    (parsed.pathname!=='/'&&parsed.pathname!=='')||parsed.search||parsed.hash){
-  throw Error('Project URLには「https://xxxxx.supabase.co」の形式を入力してください。supabase.com/dashboard/... は管理画面のURLなので使用できません。');
+ const host=parsed.hostname.toLowerCase();
+ if(parsed.protocol!=='https:'||!/^([a-z0-9-]+)\\.supabase\\.co$/.test(host)||
+    parsed.username||parsed.password||parsed.port||
+    !['','/','/rest/v1','/rest/v1/'].includes(parsed.pathname)||
+    parsed.search||parsed.hash){
+  throw Error('入力されたURLがSupabaseの接続先ではありません。Data API画面の「API URL → Copy」の値を使ってください。');
  }
  if(!key||/service_role|sb_secret_/i.test(key))throw Error('秘密鍵は使用できません。publishable / anonキーのみ入力してください。');
+ $('projectUrl').value=parsed.origin;
  return {url:parsed.origin,key};
 }
 async function connect(){
