@@ -93,7 +93,7 @@ async function updateAuth(){
 async function signIn(){
  if(!client)return notify('先に接続してください。');
  const email=$('email').value.trim();if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))return notify('正しいメールアドレスを入力してください。');
- const {error}=await client.auth.signInWithOtp({email,emailRedirectTo:location.origin+location.pathname});
+ const {error}=await client.auth.signInWithOtp({email,options:{emailRedirectTo:location.origin+location.pathname}});
  if(error)return fail(error);
  notify('ログイン用メールを送信しました。メール内のリンクでこのテスト画面に戻ってください。');
 }
