@@ -49,6 +49,12 @@ button.ghost{background:#e9efff;color:#2155bb}button:disabled{opacity:.5;cursor:
  <h2>対局データ共有プレビュー</h2>
  <p class="muted">v2.9と同じ基本形式（4人の名前・持ち点）を利用した共有テストです。実際の局結果の入力・点数計算はまだ接続していません。</p>
  <div class="readonly" id="sharedMatchView" style="white-space:pre-wrap">対局データはまだありません。</div>
+<div id="handInputBox" class="hide" style="margin-top:14px;border-top:1px solid #e2e6ee;padding-top:12px">
+<h2>局結果を入力（試験版）</h2><p class="muted">v2.9の点数計算を利用します。保存後は取り消し・編集できない試験版です。架空のテストルームでのみ使用してください。</p>
+<label for="handType">結果</label><select id="handType"><option value="ron">ロン</option><option value="tsumo">ツモ</option><option value="draw">流局</option><option value="intermediate">途中流局</option></select>
+<div id="handInputs"></div>
+<button id="commitSharedHandBtn" style="margin-top:12px">局結果を計算して共有保存</button>
+</div>
  <div id="matchEditor" class="hide">
  <p class="muted">作成者だけがテスト値を保存できます。既存のv2.9記録には影響しません。</p>
  <div id="matchFields"></div>
@@ -72,7 +78,7 @@ import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js
 const $=id=>document.getElementById(id);
 const CONFIG_KEY='mahjong-room-lab-public-config'; // Only URL + publishable key, never credentials
 let client=null,user=null,current=null,revision=null;
-let realtimeChannel=null,realtimeSequence=0;
+let realtimeChannel=null,realtimeSequence=0,lastSharedPayload=null;
 function show(id,on){$(id).classList.toggle('hide',!on)}
 function notify(msg){$('message').textContent=msg}
 function fail(e){notify(e?.message||String(e))}
@@ -82,7 +88,7 @@ function stopRealtime(){
   realtimeChannel=null;
   $('liveStatus').textContent='自動更新：停止中';
 }
-function resetRoom(){stopRealtime();current=null;revision=null;show('currentBox',false);show('inviteOwnerBox',false);show('matchEditor',false)}
+function resetRoom(){stopRealtime();current=null;revision=null;lastSharedPayload=null;$('handInputs').replaceChildren();show('currentBox',false);show('inviteOwnerBox',false);show('matchEditor',false);show('handInputBox',false)}
 function resetAuth(){user=null;show('roomBox',false);resetRoom();$('authStatus').textContent='未ログイン'}
 function validateConfig(){
  // Supabase's Data API page may copy a REST endpoint ending in /rest/v1.
@@ -196,6 +202,162 @@ async function createRoom(){
   notify('テストルームを作成しました。');await loadRooms();await openRoom(data.id);
  }catch(e){fail(e)}finally{$('createRoomBtn').disabled=false}
 }
+function makeHandControlsIfNeeded(m){
+ if(!m){$('handInputs').replaceChildren();return}
+ if($('handInputs').childNodes.length===0)makeHandControls();
+}
+
+function seatIndex(a,i){return (i-a.dealer+4)%4}
+function orderedPlayers(a,indices){return [...new Set(indices)].sort((x,y)=>seatIndex(a,x)-seatIndex(a,y))}
+function hanDisplayName(han){return han>=13?'数え役満':han>=11?'三倍満':han>=8?'倍満':han>=6?'跳満':han===5?'満貫':han+'翻'}
+function invalidHanFu(type, han, fu, riichi, yakuman){
+ if(yakuman>0 || han>=5)return false;
+ if(han<1 || !Number.isInteger(han) || !Number.isInteger(fu))return true;
+ if(fu===20)return type==='ron' || han<2; // 20 fu requires pinfu tsumo (2 han minimum)
+ if(fu===25)return han<2 || (riichi && han<3); // seven pairs requires 2 han, plus riichi
+ if(riichi && type==='tsumo' && han<2)return true; // riichi + menzen tsumo
+ if(riichi && type==='ron' && han===1 && fu===30)return true; // riichi alone cannot be 30 fu on closed ron
+ return false;
+}
+function ceil100(n){return Math.ceil(n/100)*100}
+function calcBase(han,fu,yakuman=0){
+ if(yakuman>0)return 8000*yakuman;
+ if(han>=13)return 8000;
+ if(han>=11)return 6000;
+ if(han>=8)return 4000;
+ if(han>=6)return 3000;
+ if(han>=5)return 2000;
+ return Math.min(2000,fu*Math.pow(2,han+2));
+}
+function calcHand(a,input){
+ const type=input.type, dealer=a.dealer;
+ const riichi=[...new Set(input.riichi||[])];
+ const isWin=type==='ron'||type==='tsumo';
+ const winners=isWin?[...new Set(input.winners||[])]:[];
+ const loser=type==='ron'?input.loser:null;
+ const tenpai=[...new Set([...(input.tenpai||[]),...(type==='draw'?riichi:[])])];
+ const validIndex=i=>Number.isInteger(i)&&i>=0&&i<4;
+ if(!['ron','tsumo','draw','intermediate'].includes(type))throw Error('結果を選択してください。');
+ if(!riichi.every(validIndex)||!winners.every(validIndex)||!tenpai.every(validIndex))throw Error('プレイヤーの選択を確認してください。');
+ if(isWin&&!winners.length)throw Error('和了者を選択してください。');
+ if(type==='tsumo'&&winners.length!==1)throw Error('ツモの和了者は1人選択してください。');
+ if(type==='ron'&&(!validIndex(loser)||winners.includes(loser)))throw Error('放銃者を正しく選択してください。');
+ const delta=[0,0,0,0],awards=[],honba=a.honba||0,stickCarry=a.sticks||0;
+ let retain=false, detail='',recipient=null;
+ if(isWin){
+  for(const w of winners){
+   const h=input.hands?.[w];
+   if(!h||!Number.isInteger(h.han)||!Number.isInteger(h.fu)||!Number.isInteger(h.yakuman)||h.han<1||h.yakuman<0||h.yakuman>6)throw Error('翻数・符数・役満を確認してください。');
+   if(invalidHanFu(type,h.han,h.fu,riichi.includes(w),h.yakuman))throw Error(`${a.names[w]}の翻数・符数の組み合わせは成立しません。翻数または符数を変更してください。`);
+   const b=calcBase(h.han,h.fu,h.yakuman),payment=(mult)=>ceil100(b*mult);
+   if(type==='ron'){
+    const pay=payment(w===dealer?6:4);delta[w]+=pay;delta[loser]-=pay;awards.push({player:w,points:pay});
+   }else{
+    for(let i=0;i<4;i++)if(i!==w){const pay=payment(w===dealer?2:i===dealer?2:1);delta[w]+=pay;delta[i]-=pay;}
+   }
+  }
+  if(type==='ron'){
+   // Mahjong Soul: closest winning seat in turn order to the discarder takes honba and sticks.
+   const order=[1,2,3].map(n=>(loser+n)%4);
+   recipient=order.find(i=>winners.includes(i));
+   const h=honba*300;
+   delta[recipient]+=h;delta[loser]-=h;
+   const winnerAward=awards.find(x=>x.player===recipient);if(winnerAward)winnerAward.points+=h;
+  }else{
+   recipient=winners[0];
+   for(let i=0;i<4;i++)if(i!==recipient){delta[i]-=honba*100;delta[recipient]+=honba*100;}
+  }
+  delta[recipient]+=(stickCarry+riichi.length)*1000;
+  detail=orderedPlayers(a,winners).map(w=>{let h=input.hands[w];return `${a.names[w]} ${type==='ron'?'ロン':'ツモ'}（${h.yakuman?h.yakuman+'倍役満':h.han>=13?'数え役満':hanDisplayName(h.han)+(h.han>=5?'':h.fu+'符')}）`}).join('・');
+  retain=winners.includes(dealer);
+ }else if(type==='draw'){
+  const noten=[0,1,2,3].filter(i=>!tenpai.includes(i));
+  if(tenpai.length&&noten.length){const gain=3000/tenpai.length,loss=3000/noten.length;tenpai.forEach(i=>delta[i]+=gain);noten.forEach(i=>delta[i]-=loss)}
+  detail=`流局（聴牌：${orderedPlayers(a,tenpai).map(i=>a.names[i]).join('・')||'なし'}）`;
+  retain=tenpai.includes(dealer);
+ }else{detail='途中流局';retain=true;}
+ // Each declared riichi player deposits 1000 this hand, even if the hand ends in a draw.
+ riichi.forEach(i=>delta[i]-=1000);
+ if(delta.some(x=>!Number.isFinite(x)||x%100!==0))throw Error('点数計算に不整合があります。');
+ const nextPoints=a.points.map((x,i)=>x+delta[i]);
+ const nextSticks=isWin?0:stickCarry+riichi.length;
+ // Draws increase honba even when the dealer rotates. A non-dealer win resets honba.
+ const nextHonba=(type==='draw'||type==='intermediate'||retain)?honba+1:0;
+ const nextDealer=retain?dealer:(dealer+1)%4;
+ const nextRound=retain?a.round:a.round+1;
+ return {delta,awards,detail,winners,loser,riichi,tenpai,points:nextPoints,sticks:nextSticks,honba:nextHonba,dealer:nextDealer,round:nextRound,retain,recipient};
+}
+function rankIndices(points){
+ return [0,1,2,3].sort((a,b)=>(points[b]-points[a])||(a-b));
+}
+function leaderOf(points){return rankIndices(points)[0]}
+function endDecision(before,outcome){
+ const points=outcome.points,threshold=MATCH_RULES.threshold;
+ if(points.some(x=>x<0))return {ended:true,reason:'飛び終了'};
+ const lastRound=before.round;
+ if(lastRound<7)return {ended:false};
+ const top=leaderOf(points),qualifies=points[top]>=threshold;
+ const isDealerLeading=top===before.dealer;
+ if(lastRound===7){
+  // South 4: auto-win/tenpai-stop for a leading final dealer with >=30k.
+  if(outcome.retain)return {ended:qualifies&&isDealerLeading,reason:'南4局 親のあがりやめ・聴牌やめ'};
+  return {ended:qualifies,reason:'南4局終了'};
+ }
+ // West extension: sudden-death on a qualifying outcome unless dealer remains
+ // and another player is leading. Hard stop after West 4 changes dealer.
+ if(lastRound>=11)return {ended:true,reason:'西4局終了'};
+ if(outcome.retain)return {ended:qualifies&&isDealerLeading,reason:'西入後の親のあがりやめ・聴牌やめ'};
+ return {ended:qualifies,reason:'西入後の規定点到達'};
+}
+const MATCH_RULES={start:25000,return:30000,uma:[10,5,-5,-10],oka:20,threshold:30000};
+
+function makeHandControls(){
+ const m=testMatchFromPayload(lastSharedPayload);
+ const root=$('handInputs');root.replaceChildren();
+ if(!m)return;
+ const type=$('handType').value;
+ const f=document.createElement('div');
+ let html='';
+ if(type==='ron'||type==='tsumo'){
+  html+='<label>和了者'+(type==='ron'?'（複数選択可）':'')+'</label>';
+  for(let i=0;i<4;i++)html+='<label style="font-weight:400"><input type="'+(type==='ron'?'checkbox':'radio')+'" name="winnerSeat" value="'+i+'" style="display:inline;width:auto;height:auto;margin-right:8px">'+escapeHtml(m.names[i])+'</label>';
+  if(type==='ron'){html+='<label for="handLoser">放銃者</label><select id="handLoser">'+m.names.map((n,i)=>'<option value="'+i+'">'+escapeHtml(n)+'</option>').join('')+'</select>'}
+  html+='<p class="muted">和了者ごとの翻・符・役満倍率（役満でない場合は0）</p>';
+  for(let i=0;i<4;i++)html+='<div class="row" style="margin:6px 0"><b style="min-width:60px">'+escapeHtml(m.names[i])+'</b><label>翻<input id="handHan'+i+'" type="number" value="1" min="1" max="99" style="width:63px"></label><label>符<input id="handFu'+i+'" type="number" value="30" min="20" max="110" step="5" style="width:70px"></label><label>役満倍率<input id="handYakuman'+i+'" type="number" value="0" min="0" max="6" style="width:68px"></label></div>';
+ }
+ if(type==='draw')html+='<label>聴牌者</label>'+m.names.map((n,i)=>'<label style="font-weight:400"><input type="checkbox" name="handTenpai" value="'+i+'" style="display:inline;width:auto;height:auto;margin-right:8px">'+escapeHtml(n)+'</label>').join('');
+ html+='<label>今回リーチを宣言したプレイヤー</label>'+m.names.map((n,i)=>'<label style="font-weight:400"><input type="checkbox" name="handRiichi" value="'+i+'" style="display:inline;width:auto;height:auto;margin-right:8px">'+escapeHtml(n)+'</label>').join('');
+ f.innerHTML=html;root.append(f);
+}
+function escapeHtml(v){return String(v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+function checks(name){return [...document.querySelectorAll('input[name="'+name+'"]:checked')].map(el=>Number(el.value))}
+async function commitSharedHand(){
+ if(!current||current.owner_id!==user?.id)return notify('編集権限がありません。');
+ const roomId=current.id,type=$('handType').value;
+ const winners=checks('winnerSeat'),riichi=checks('handRiichi'),tenpai=checks('handTenpai');
+ const hands={};
+ for(const w of winners)hands[w]={han:Number($('handHan'+w).value),fu:Number($('handFu'+w).value),yakuman:Number($('handYakuman'+w).value)};
+ const loser=type==='ron'?Number($('handLoser').value):null;
+ $('commitSharedHandBtn').disabled=true;
+ try{
+  const {data,error:readError}=await client.from('mahjong_room_snapshots').select('revision,payload').eq('room_id',roomId).single();
+  if(readError)throw readError;
+  const m=testMatchFromPayload(data.payload);
+  if(!m)throw Error('先に4人の対局情報を共有保存してください。');
+  if(m.status==='完了')throw Error('完了した半荘は編集できません。');
+  const initial={...m,honba:Number(m.honba)||0,sticks:Number(m.sticks)||0,dealer:Number(m.dealer)||0,round:Number(m.round)||0};
+  const result=calcHand(initial,{type,winners,loser,riichi,tenpai,hands});
+  const hand={roundIndex:initial.round,label:(['東','南','西','北'][Math.floor(initial.round/4)]||'北')+(initial.round%4+1)+'局 '+initial.honba+'本場',honba:initial.honba,type,result:result.detail,delta:result.delta,riichi,winners,loser,tenpai,hands,input:{type,winners,loser,riichi,tenpai,hands}};
+  const updated={...m,points:result.points,dealer:result.dealer,round:result.round,honba:result.honba,sticks:result.sticks,hands:[...(m.hands||[]),hand]};
+  const decision=endDecision({round:initial.round,dealer:initial.dealer},result);
+  if(decision.ended){updated.status='完了';updated.endReason=decision.reason;updated.finished=new Date().toISOString()}
+  if(updated.hands.length>100)throw Error('テストは最大100局までです。');
+  const {error}=await client.rpc('mahjong_write_snapshot',{p_room_id:roomId,p_expected_revision:data.revision,p_payload:{...data.payload,sharedMatch:updated}});
+  if(error)throw error;
+  notify('局結果を保存しました：'+result.detail);await refresh();
+ }catch(e){fail(e)}finally{$('commitSharedHandBtn').disabled=false}
+}
+
 function seatLabel(i){return ['東家','南家','西家','北家'][i]}
 function testMatchFromPayload(payload){
  const m=payload?.sharedMatch;
@@ -203,14 +365,16 @@ function testMatchFromPayload(payload){
  return m;
 }
 function renderSharedMatch(payload){
+ lastSharedPayload=payload;
  const m=testMatchFromPayload(payload);
  $('sharedMatchView').textContent=m?
   m.names.map((name,i)=>seatLabel(i)+'：'+String(name)+'　'+Number(m.points[i]).toLocaleString('ja-JP')+'点').join('\n')+
   '\n局数：'+(Array.isArray(m.hands)?m.hands.length:0)+'局 / 状態：'+(m.status||'進行中'):
   'まだ共有対局データはありません。作成者が保存すると表示されます。';
  const owner=current&&user&&current.owner_id===user.id;
- show('matchEditor',!!owner);
+ show('matchEditor',!!owner);show('handInputBox',!!owner&&!!m&&m.status!=='完了');
  if(!owner)return;
+ makeHandControlsIfNeeded(m);
  const inputs=$('matchFields');
  // While the editor is being typed, don't overwrite the values on every realtime event.
  if(document.activeElement&&inputs.contains(document.activeElement))return;
@@ -237,6 +401,7 @@ async function saveSharedMatch(){
   if(readError)throw readError;
   // Preserve unrelated fields such as testCounter; edit only the sharedMatch namespace.
   const prior=testMatchFromPayload(data.payload);
+  if(prior?.hands?.length)throw Error('局履歴がある対局は、この簡易編集欄で変更できません。');
   const sharedMatch={id:prior?.id||Date.now(),title:current.title,date:prior?.date||new Date().toISOString(),names,points,round:prior?.round||0,dealer:prior?.dealer||0,honba:prior?.honba||0,sticks:prior?.sticks||0,hands:prior?.hands||[],status:prior?.status||'進行中'};
   const payload={...data.payload,sharedMatch};
   const {error}=await client.rpc('mahjong_write_snapshot',{p_room_id:roomId,p_expected_revision:data.revision,p_payload:payload});
@@ -248,7 +413,7 @@ async function openRoom(id){
  if(!client||!user)return;
  const {data:room,error}=await client.from('mahjong_rooms').select('id,title,owner_id,status').eq('id',id).single();
  if(error)return fail(error);
- stopRealtime();
+ stopRealtime();$('handInputs').replaceChildren();
  current=room;show('currentBox',true);$('currentTitle').textContent=room.title;
  $('currentMeta').textContent=room.owner_id===user.id?'作成者（編集可）':'参加者（閲覧のみ）';
  $('incrementBtn').disabled=room.owner_id!==user.id;
@@ -317,5 +482,7 @@ $('reloadRoomsBtn').onclick=loadRooms;
 $('refreshBtn').onclick=refresh;
 $('incrementBtn').onclick=increment;
 $('saveMatchBtn').onclick=saveSharedMatch;
+$('handType').onchange=makeHandControls;
+$('commitSharedHandBtn').onclick=commitSharedHand;
 try{const saved=JSON.parse(localStorage.getItem(CONFIG_KEY)||'null');if(saved&&saved.url&&saved.key){$('projectUrl').value=saved.url;$('publicKey').value=saved.key;connect()}}catch(e){/* Invalid saved config: manual connection remains available. */}
 </script></body></html>
