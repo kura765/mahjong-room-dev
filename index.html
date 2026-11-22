@@ -33,7 +33,7 @@ button.ghost{background:#e9efff;color:#2155bb}button:disabled{opacity:.5;cursor:
  </div>
 </section>
 <section id="roomBox" class="hide"><h2>テストルーム</h2>
-<p class="muted">最初は架空のテストデータだけを使います。招待コードはSQLを適用すると利用できます。リアルタイム配信はまだ未実装です。</p>
+<p class="muted">最初は架空のテストデータだけを使います。招待コードとリアルタイム通知を試験中です。自動更新にはSupabase側でRealtime用SQLを実行してください。</p>
 <label for="roomTitle">部屋名</label><input id="roomTitle" value="動作確認用の半荘">
 <div class="row" style="margin-top:12px"><button id="createRoomBtn">テストルームを作成</button><button class="ghost" id="reloadRoomsBtn">一覧を更新</button></div>
 <div id="roomList"></div>
@@ -45,6 +45,7 @@ button.ghost{background:#e9efff;color:#2155bb}button:disabled{opacity:.5;cursor:
 <section id="currentBox" class="hide"><h2 id="currentTitle">選択中のルーム</h2>
 <div class="meta" id="currentMeta"></div>
 <div class="readonly" id="snapshotView"></div>
+ <p id="liveStatus" class="muted" role="status">自動更新：停止中</p>
 <div class="row" style="margin-top:12px"><button id="incrementBtn">テスト用カウントを＋1</button><button class="ghost" id="refreshBtn">再読み込み</button></div>
  <div id="inviteOwnerBox" class="hide" style="margin-top:18px;border-top:1px solid #e2e6ee;padding-top:12px">
  <h2>閲覧者を招待</h2><p class="muted">48時間有効・1回限りの招待コードを発行します。コードを知った人は閲覧者として参加できるため、相手だけに伝えてください。</p>
@@ -61,10 +62,17 @@ import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js
 const $=id=>document.getElementById(id);
 const CONFIG_KEY='mahjong-room-lab-public-config'; // Only URL + publishable key, never credentials
 let client=null,user=null,current=null,revision=null;
+let realtimeChannel=null,realtimeSequence=0;
 function show(id,on){$(id).classList.toggle('hide',!on)}
 function notify(msg){$('message').textContent=msg}
 function fail(e){notify(e?.message||String(e))}
-function resetRoom(){current=null;revision=null;show('currentBox',false);show('inviteOwnerBox',false)}
+function stopRealtime(){
+  realtimeSequence++;
+  if(realtimeChannel&&client)client.removeChannel(realtimeChannel);
+  realtimeChannel=null;
+  $('liveStatus').textContent='自動更新：停止中';
+}
+function resetRoom(){stopRealtime();current=null;revision=null;show('currentBox',false);show('inviteOwnerBox',false)}
 function resetAuth(){user=null;show('roomBox',false);resetRoom();$('authStatus').textContent='未ログイン'}
 function validateConfig(){
  // Supabase's Data API page may copy a REST endpoint ending in /rest/v1.
@@ -182,15 +190,43 @@ async function openRoom(id){
  if(!client||!user)return;
  const {data:room,error}=await client.from('mahjong_rooms').select('id,title,owner_id,status').eq('id',id).single();
  if(error)return fail(error);
+ stopRealtime();
  current=room;show('currentBox',true);$('currentTitle').textContent=room.title;
  $('currentMeta').textContent=room.owner_id===user.id?'作成者（編集可）':'参加者（閲覧のみ）';
  $('incrementBtn').disabled=room.owner_id!==user.id;
  show('inviteOwnerBox',room.owner_id===user.id);$('generatedInvite').value='';
  await refresh();
+ subscribeToRoom(room.id);
+}
+function subscribeToRoom(roomId){
+ if(!client||!user)return;
+ const sequence=++realtimeSequence;
+ $('liveStatus').textContent='自動更新：接続中…';
+ const channel=client.channel('mahjong-snapshot-'+roomId+'-'+sequence)
+  .on('postgres_changes',{
+    event:'UPDATE',schema:'public',table:'mahjong_room_snapshots',filter:'room_id=eq.'+roomId
+  },async ()=>{
+    if(sequence!==realtimeSequence||current?.id!==roomId)return;
+    try{
+      await refresh();
+      if(sequence===realtimeSequence)notify('別の端末からの変更を自動反映しました。');
+    }catch(e){if(sequence===realtimeSequence)fail(e)}
+  })
+  .subscribe((status,err)=>{
+    if(sequence!==realtimeSequence)return;
+    if(status==='SUBSCRIBED')$('liveStatus').textContent='自動更新：接続中';
+    else if(status==='CHANNEL_ERROR'||status==='TIMED_OUT'||status==='CLOSED'){
+      $('liveStatus').textContent='自動更新：未接続（再読み込みボタンは利用可）';
+      if(err)notify('Realtime接続: '+(err.message||String(err)));
+    }
+  });
+ realtimeChannel=channel;
 }
 async function refresh(){
  if(!current)return;
- const {data,error}=await client.from('mahjong_room_snapshots').select('revision,payload,updated_at').eq('room_id',current.id).single();
+ const roomId=current.id;
+ const {data,error}=await client.from('mahjong_room_snapshots').select('revision,payload,updated_at').eq('room_id',roomId).single();
+ if(current?.id!==roomId)return;
  if(error)return fail(error);
  revision=data.revision;
  $('snapshotView').textContent='更新番号: '+revision+'\nテスト回数: '+(data.payload?.testCounter||0)+'\n最終更新: '+(data.updated_at||'未設定');
@@ -208,14 +244,14 @@ async function increment(){
  }catch(e){fail(e)}finally{$('incrementBtn').disabled=false;await refresh()}
 }
 $('connectBtn').onclick=connect;
-$('disconnectBtn').onclick=async()=>{if(client)await client.auth.signOut();client=null;resetAuth();show('authBox',false);localStorage.removeItem(CONFIG_KEY);$('projectUrl').value='';$('publicKey').value='';notify('接続を解除しました。')};
+$('disconnectBtn').onclick=async()=>{resetAuth();if(client)await client.auth.signOut();client=null;show('authBox',false);localStorage.removeItem(CONFIG_KEY);$('projectUrl').value='';$('publicKey').value='';notify('接続を解除しました。')};
 $('signInBtn').onclick=signIn;
 $('passwordLoginBtn').onclick=passwordLogin;
 $('passwordSetBtn').onclick=setPassword;
 $('createInviteBtn').onclick=createInvite;
 $('joinInviteBtn').onclick=joinInvite;
 $('copyInviteBtn').onclick=()=>{$('generatedInvite').focus();$('generatedInvite').select();notify('コードを選択しました。コピーして相手だけに送ってください。')};
-$('signOutBtn').onclick=async()=>{if(client)await client.auth.signOut();await updateAuth()};
+$('signOutBtn').onclick=async()=>{resetRoom();if(client)await client.auth.signOut();await updateAuth()};
 $('createRoomBtn').onclick=createRoom;
 $('reloadRoomsBtn').onclick=loadRooms;
 $('refreshBtn').onclick=refresh;
