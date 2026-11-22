@@ -44,7 +44,17 @@ button.ghost{background:#e9efff;color:#2155bb}button:disabled{opacity:.5;cursor:
  </div></section>
 <section id="currentBox" class="hide"><h2 id="currentTitle">選択中のルーム</h2>
 <div class="meta" id="currentMeta"></div>
-<div class="readonly" id="snapshotView"></div>
+<div class="readonly" id="snapshotView" style="white-space:pre-wrap"></div>
+ <div style="margin-top:16px;border-top:1px solid #e2e6ee;padding-top:12px">
+ <h2>対局データ共有プレビュー</h2>
+ <p class="muted">v2.9と同じ基本形式（4人の名前・持ち点）を利用した共有テストです。実際の局結果の入力・点数計算はまだ接続していません。</p>
+ <div class="readonly" id="sharedMatchView" style="white-space:pre-wrap">対局データはまだありません。</div>
+ <div id="matchEditor" class="hide">
+ <p class="muted">作成者だけがテスト値を保存できます。既存のv2.9記録には影響しません。</p>
+ <div id="matchFields"></div>
+ <button id="saveMatchBtn" style="margin-top:12px">この4人の情報を共有保存</button>
+ </div>
+ </div>
  <p id="liveStatus" class="muted" role="status">自動更新：停止中</p>
 <div class="row" style="margin-top:12px"><button id="incrementBtn">テスト用カウントを＋1</button><button class="ghost" id="refreshBtn">再読み込み</button></div>
  <div id="inviteOwnerBox" class="hide" style="margin-top:18px;border-top:1px solid #e2e6ee;padding-top:12px">
@@ -72,7 +82,7 @@ function stopRealtime(){
   realtimeChannel=null;
   $('liveStatus').textContent='自動更新：停止中';
 }
-function resetRoom(){stopRealtime();current=null;revision=null;show('currentBox',false);show('inviteOwnerBox',false)}
+function resetRoom(){stopRealtime();current=null;revision=null;show('currentBox',false);show('inviteOwnerBox',false);show('matchEditor',false)}
 function resetAuth(){user=null;show('roomBox',false);resetRoom();$('authStatus').textContent='未ログイン'}
 function validateConfig(){
  // Supabase's Data API page may copy a REST endpoint ending in /rest/v1.
@@ -186,6 +196,54 @@ async function createRoom(){
   notify('テストルームを作成しました。');await loadRooms();await openRoom(data.id);
  }catch(e){fail(e)}finally{$('createRoomBtn').disabled=false}
 }
+function seatLabel(i){return ['東家','南家','西家','北家'][i]}
+function testMatchFromPayload(payload){
+ const m=payload?.sharedMatch;
+ if(!m||!Array.isArray(m.names)||!Array.isArray(m.points)||m.names.length!==4||m.points.length!==4)return null;
+ return m;
+}
+function renderSharedMatch(payload){
+ const m=testMatchFromPayload(payload);
+ $('sharedMatchView').textContent=m?
+  m.names.map((name,i)=>seatLabel(i)+'：'+String(name)+'　'+Number(m.points[i]).toLocaleString('ja-JP')+'点').join('\n')+
+  '\n局数：'+(Array.isArray(m.hands)?m.hands.length:0)+'局 / 状態：'+(m.status||'進行中'):
+  'まだ共有対局データはありません。作成者が保存すると表示されます。';
+ const owner=current&&user&&current.owner_id===user.id;
+ show('matchEditor',!!owner);
+ if(!owner)return;
+ const inputs=$('matchFields');
+ // While the editor is being typed, don't overwrite the values on every realtime event.
+ if(document.activeElement&&inputs.contains(document.activeElement))return;
+ inputs.replaceChildren();
+ for(let i=0;i<4;i++){
+  const wrap=document.createElement('div');wrap.className='row';wrap.style.marginTop='8px';
+  const label=document.createElement('label');label.textContent=seatLabel(i);label.style.width='46px';
+  const name=document.createElement('input');name.id='matchName'+i;name.placeholder=seatLabel(i)+'の名前';name.style.flex='1 1 110px';name.maxLength=40;name.value=m?.names[i]||'';
+  const points=document.createElement('input');points.id='matchPoints'+i;points.type='number';points.inputMode='numeric';points.step='100';points.min='-1000000';points.max='1000000';points.style.flex='1 1 95px';points.value=m?.points[i]??25000;
+  wrap.append(label,name,points);inputs.append(wrap);
+ }
+}
+async function saveSharedMatch(){
+ if(!current||!user||current.owner_id!==user.id)return notify('編集権限がありません。');
+ const names=[0,1,2,3].map(i=>$('matchName'+i)?.value.trim()||'');
+ const points=[0,1,2,3].map(i=>Number($('matchPoints'+i)?.value));
+ if(names.some(n=>!n||n.length>40)||new Set(names).size!==4)return notify('4人の異なる名前を入力してください。');
+ if(points.some(n=>!Number.isSafeInteger(n)||n < -1000000||n>1000000))return notify('持ち点を整数で入力してください。');
+ if(points.reduce((a,b)=>a+b,0)!==100000)return notify('テストでは持ち点の合計を100,000点にしてください。');
+ $('saveMatchBtn').disabled=true;
+ const roomId=current.id;
+ try{
+  const {data,error:readError}=await client.from('mahjong_room_snapshots').select('revision,payload').eq('room_id',roomId).single();
+  if(readError)throw readError;
+  // Preserve unrelated fields such as testCounter; edit only the sharedMatch namespace.
+  const prior=testMatchFromPayload(data.payload);
+  const sharedMatch={id:prior?.id||Date.now(),title:current.title,date:prior?.date||new Date().toISOString(),names,points,round:prior?.round||0,dealer:prior?.dealer||0,honba:prior?.honba||0,sticks:prior?.sticks||0,hands:prior?.hands||[],status:prior?.status||'進行中'};
+  const payload={...data.payload,sharedMatch};
+  const {error}=await client.rpc('mahjong_write_snapshot',{p_room_id:roomId,p_expected_revision:data.revision,p_payload:payload});
+  if(error)throw error;
+  notify('4人の対局情報を共有保存しました。');await refresh();
+ }catch(e){fail(e)}finally{$('saveMatchBtn').disabled=false}
+}
 async function openRoom(id){
  if(!client||!user)return;
  const {data:room,error}=await client.from('mahjong_rooms').select('id,title,owner_id,status').eq('id',id).single();
@@ -194,6 +252,7 @@ async function openRoom(id){
  current=room;show('currentBox',true);$('currentTitle').textContent=room.title;
  $('currentMeta').textContent=room.owner_id===user.id?'作成者（編集可）':'参加者（閲覧のみ）';
  $('incrementBtn').disabled=room.owner_id!==user.id;
+ show('matchEditor',room.owner_id===user.id);
  show('inviteOwnerBox',room.owner_id===user.id);$('generatedInvite').value='';
  await refresh();
  subscribeToRoom(room.id);
@@ -230,6 +289,7 @@ async function refresh(){
  if(error)return fail(error);
  revision=data.revision;
  $('snapshotView').textContent='更新番号: '+revision+'\nテスト回数: '+(data.payload?.testCounter||0)+'\n最終更新: '+(data.updated_at||'未設定');
+ renderSharedMatch(data.payload);
 }
 async function increment(){
  if(!current||current.owner_id!==user?.id||revision===null)return;
@@ -256,5 +316,6 @@ $('createRoomBtn').onclick=createRoom;
 $('reloadRoomsBtn').onclick=loadRooms;
 $('refreshBtn').onclick=refresh;
 $('incrementBtn').onclick=increment;
+$('saveMatchBtn').onclick=saveSharedMatch;
 try{const saved=JSON.parse(localStorage.getItem(CONFIG_KEY)||'null');if(saved&&saved.url&&saved.key){$('projectUrl').value=saved.url;$('publicKey').value=saved.key;connect()}}catch(e){/* Invalid saved config: manual connection remains available. */}
 </script></body></html>
