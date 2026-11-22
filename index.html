@@ -369,7 +369,9 @@ function renderSharedMatch(payload){
  const m=testMatchFromPayload(payload);
  $('sharedMatchView').textContent=m?
   m.names.map((name,i)=>seatLabel(i)+'：'+String(name)+'　'+Number(m.points[i]).toLocaleString('ja-JP')+'点').join('\n')+
-  '\n局数：'+(Array.isArray(m.hands)?m.hands.length:0)+'局 / 状態：'+(m.status||'進行中'):
+  '\n現在：'+(['東','南','西','北'][Math.floor(Number(m.round||0)/4)]||'北')+(Number(m.round||0)%4+1)+'局 / '+(Number(m.honba)||0)+'本場 / 供託'+(Number(m.sticks)||0)+'本'+
+  '\n局数：'+(Array.isArray(m.hands)?m.hands.length:0)+'局 / 状態：'+(m.status||'進行中')+
+  (Array.isArray(m.hands)&&m.hands.length?'\n\n直近の局履歴：\n'+m.hands.slice(-5).map(h=>String(h.label||'')+' '+String(h.result||'')+'　'+(Array.isArray(h.delta)?h.delta.map((d,i)=>(Number(d)>=0?'+':'')+Number(d)).join(' / '):'')).join('\n'):''):
   'まだ共有対局データはありません。作成者が保存すると表示されます。';
  const owner=current&&user&&current.owner_id===user.id;
  show('matchEditor',!!owner);show('handInputBox',!!owner&&!!m&&m.status!=='完了');
