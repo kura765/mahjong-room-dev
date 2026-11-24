@@ -40,6 +40,9 @@ button.danger{background:#fff0f0;color:#aa2935}
 .player-manager-row:last-child{border:0}.player-manager-row button{min-height:38px;padding:6px 12px}
 .player-manager-row small{display:block;color:#667085;font-size:11px}
 .record-player-select{flex:1 1 150px;min-width:130px}.record-player-select select{width:100%}
+.manual-mode-label{display:flex;gap:8px;align-items:center;margin:12px 0 4px;cursor:pointer}
+.manual-mode-label input{height:20px;width:20px;min-width:20px;margin:0}
+#matchSetupHint{font-size:12px}
 #playerManagerNotice{font-size:12px;color:#667085}
 .topnav{display:flex;gap:8px;position:sticky;top:0;background:#f4f6fa;padding:8px 0;z-index:4}
 .topnav button{flex:1;min-height:43px;background:#e7edf8;color:#34517f}
@@ -134,7 +137,9 @@ button.danger{background:#fff0f0;color:#aa2935}
 </div>
  <div id="matchEditor" class="hide">
  <p class="muted">作成者だけが半荘を編集できます。局を記録し始めた後は、プレイヤー名・初期持ち点・ルールを変更できません。</p>
- <div id="matchFields"></div>
+ <label class="manual-mode-label"><input id="manualMatchNames" type="checkbox">プレイヤー名を直接入力する（登録せずにテスト）</label>
+<p id="matchSetupHint" class="muted">登録済みプレイヤーを選択するか、名前を直接入力して開始できます。</p>
+<div id="matchFields"></div>
  <details id="sharedRulesDetails" style="margin:12px 0"><summary>半荘ルールを設定（開始前のみ）</summary><div class="rule-grid" id="sharedRules"></div></details>
  <button id="saveMatchBtn" style="margin-top:12px">この4人の情報を共有保存</button>
  </div>
@@ -170,6 +175,7 @@ let realtimeChannel=null,realtimeSequence=0,lastSharedPayload=null,pendingInvite
 let sharedEditIndex=null,sharedEditRoom=null,handWriteBusy=false;
 let playerRegistry=[],playerRegistryLoaded=false;
 let sharedStatsRows=[],sharedStatsSelectedId=null,sharedStatsBusy=false;
+let matchNameModeRoom=null,matchNameModeIsManual=false;
 function show(id,on){$(id).classList.toggle('hide',!on)}
 function notify(msg){$('message').textContent=msg}
 function fail(e){notify(e?.message||String(e))}
@@ -179,7 +185,7 @@ function stopRealtime(){
   realtimeChannel=null;
   $('liveStatus').textContent='自動更新：停止中';
 }
-function resetRoom(){stopRealtime();current=null;revision=null;lastSharedPayload=null;sharedEditIndex=null;sharedEditRoom=null;sharedEditingOriginal=null;$('handInputs').replaceChildren();show('currentBox',false);show('inviteOwnerBox',false);show('matchEditor',false);show('handInputBox',false)}
+function resetRoom(){matchNameModeRoom=null;matchNameModeIsManual=false;stopRealtime();current=null;revision=null;lastSharedPayload=null;sharedEditIndex=null;sharedEditRoom=null;sharedEditingOriginal=null;$('handInputs').replaceChildren();show('currentBox',false);show('inviteOwnerBox',false);show('matchEditor',false);show('handInputBox',false)}
 function resetAuth(){user=null;playerRegistry=[];playerRegistryLoaded=false;show('roomBox',false);resetRoom();$('authStatus').textContent='未ログイン'}
 function inviteInfoFromHash(){const h=new URLSearchParams(location.hash.slice(1));return h.has('invite')?{code:h.get('invite'),project:h.get('project'),key:h.get('key')}:null}
 function clearInviteHash(){history.replaceState(null,'',location.pathname+location.search)}
@@ -824,11 +830,15 @@ function renderSharedMatch(payload){
  if(document.activeElement&&inputs.contains(document.activeElement))return;
  inputs.replaceChildren();
  const oldWithoutIds=!!m&&!Array.isArray(m.playerIds);
+ const manualNames=oldWithoutIds||matchNameModeIsManual||!playerRegistryLoaded||activePlayers().length<4;
+ $('manualMatchNames').checked=manualNames;
+ show('manualMatchNames',!oldWithoutIds);
+ $('matchSetupHint').textContent=manualNames?'東家・南家・西家・北家の4人の名前を入力し、「この4人の情報を共有保存」を押してください。':'登録済みの4人を選択し、「この4人の情報を共有保存」を押してください。';
  for(let i=0;i<4;i++){
   const wrap=document.createElement('div');wrap.className='row';wrap.style.marginTop='8px';
   const label=document.createElement('label');label.textContent=seatLabel(i);label.style.width='46px';
   let name;
-  if(oldWithoutIds){
+  if(manualNames){
    name=document.createElement('input');name.id='matchName'+i;name.placeholder=seatLabel(i)+'の名前';name.style.flex='1 1 110px';name.maxLength=40;name.value=m.names[i]||'';
   }else{
    name=document.createElement('select');name.id='matchPlayerId'+i;name.className='record-player-select';
@@ -847,11 +857,16 @@ function renderSharedMatch(payload){
 async function saveSharedMatch(){
  if(!current||!user||current.owner_id!==user.id)return notify('編集権限がありません。');
  const oldWithoutIds=!!testMatchFromPayload(lastSharedPayload)&&!Array.isArray(testMatchFromPayload(lastSharedPayload).playerIds);
- const ids=oldWithoutIds?null:[0,1,2,3].map(i=>$('matchPlayerId'+i)?.value||'');
- if(!oldWithoutIds&&!playerRegistryLoaded)return notify('プレイヤー一覧を読み込めません。SQLの適用を確認してください。');
+ const manualNames=oldWithoutIds||$('manualMatchNames').checked||!playerRegistryLoaded||activePlayers().length<4;
+ const ids=manualNames?null:[0,1,2,3].map(i=>$('matchPlayerId'+i)?.value||'');
  if(ids&&(ids.some(id=>!id||!ownerPlayerById(id)||!!ownerPlayerById(id).deleted_at)||new Set(ids).size!==4))
   return notify('登録中の異なるプレイヤーを4人選択してください。未登録ならプレイヤー管理から登録してください。');
  const names=ids?ids.map(id=>ownerPlayerById(id).display_name):[0,1,2,3].map(i=>$('matchName'+i)?.value.trim()||'');
+ // Direct name input is deliberately allowed in the dev lab for end-to-end round testing.
+ // Only match all four exact active records to their IDs. Never infer partial identities.
+ const resolvedIds=ids||((playerRegistryLoaded&&names.every(n=>activePlayers().some(p=>p.display_name===n)))
+  ?names.map(n=>activePlayers().find(p=>p.display_name===n).id):null);
+ if(resolvedIds&&new Set(resolvedIds).size!==4)return notify('異なる4人のプレイヤーを選択してください。');
  const points=[0,1,2,3].map(i=>Number($('matchPoints'+i)?.value));
  let rules;try{rules=readSharedRules()}catch(e){return fail(e)}
  if(names.some(n=>!n||n.length>40)||new Set(names).size!==4)return notify('4人の異なる名前を入力してください。');
@@ -866,11 +881,11 @@ async function saveSharedMatch(){
   // Preserve unrelated fields such as testCounter; edit only the sharedMatch namespace.
   const prior=testMatchFromPayload(data.payload);
   if(prior?.hands?.length||prior?.status==='完了'||prior?.status==='中断')throw Error('開始済み・中断中の半荘はこの編集欄で変更できません。');
-  const sharedMatch={id:prior?.id||Date.now(),title:current.title,date:prior?.date||new Date().toISOString(),names,...(ids?{playerIds:ids}:{}),points,initialPoints:prior?.initialPoints||points.slice(),rules,round:prior?.round||0,dealer:prior?.dealer||0,honba:prior?.honba||0,sticks:prior?.sticks||0,hands:prior?.hands||[],status:prior?.status||'進行中'};
+  const sharedMatch={id:prior?.id||Date.now(),title:current.title,date:prior?.date||new Date().toISOString(),names,...(resolvedIds?{playerIds:resolvedIds}:{}),points,initialPoints:prior?.initialPoints||points.slice(),rules,round:prior?.round||0,dealer:prior?.dealer||0,honba:prior?.honba||0,sticks:prior?.sticks||0,hands:prior?.hands||[],status:prior?.status||'進行中'};
   const payload={...data.payload,sharedMatch};
   const {error}=await client.rpc('mahjong_write_snapshot',{p_room_id:roomId,p_expected_revision:data.revision,p_payload:payload});
   if(error)throw error;
-  notify('4人の対局情報を共有保存しました。');await refresh();
+  await refresh();notify('4人の対局情報を保存しました。「局の結果」でロン・ツモなどを記録できます。');
  }catch(e){fail(e)}finally{$('saveMatchBtn').disabled=false}
 }
 function closeRoomSelection(){resetRoom();loadRooms();notify('半荘の記録欄を閉じました。クラウド上の半荘は引き続き保存されています。')}
@@ -951,6 +966,13 @@ $('reloadRoomsBtn').onclick=loadRooms;
 $('refreshBtn').onclick=refresh;
 $('incrementBtn').onclick=increment;
 $('saveMatchBtn').onclick=saveSharedMatch;
+$('manualMatchNames').onchange=()=>{
+ const inputs=$('matchFields'),saved=Array.from({length:4},(_,i)=>$('matchName'+i)?.value||'');
+ matchNameModeIsManual=$('manualMatchNames').checked;
+ // Rebuild only the start form, preserving manual inputs when possible.
+ inputs.replaceChildren();renderSharedMatch(lastSharedPayload);
+ if(matchNameModeIsManual)saved.forEach((name,i)=>{if(name&&$('matchName'+i))$('matchName'+i).value=name});
+};
 $('handType').onchange=makeHandControls;
 document.querySelectorAll('input[name="handTypeChoice"]').forEach(el=>el.onchange=()=>{if(el.checked){$('handType').value=el.value;makeHandControls()}});
 $('commitSharedHandBtn').onclick=commitSharedHand;
