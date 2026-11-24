@@ -25,6 +25,11 @@ button.ghost{background:#e9efff;color:#2155bb}button:disabled{opacity:.5;cursor:
 .shared-actions{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0}
 .shared-actions button{flex:1 1 120px}
 button.danger{background:#fff0f0;color:#aa2935}
+.player-manager-row{display:flex;align-items:center;justify-content:space-between;gap:8px;border-bottom:1px solid #e5e7eb;padding:9px 0}
+.player-manager-row:last-child{border:0}.player-manager-row button{min-height:38px;padding:6px 12px}
+.player-manager-row small{display:block;color:#667085;font-size:11px}
+.record-player-select{flex:1 1 150px;min-width:130px}.record-player-select select{width:100%}
+#playerManagerNotice{font-size:12px;color:#667085}
 .topnav{display:flex;gap:8px;position:sticky;top:0;background:#f4f6fa;padding:8px 0;z-index:4}
 .topnav button{flex:1;min-height:43px;background:#e7edf8;color:#34517f}
 .topnav button.selected{background:#2663ea;color:white}
@@ -71,6 +76,12 @@ button.danger{background:#fff0f0;color:#aa2935}
 <label for="roomTitle">新しい半荘の名前</label><input id="roomTitle" value="新しい半荘">
 <div class="row" style="margin-top:12px"><button id="createRoomBtn">新しい半荘を始める</button><button class="ghost" id="reloadRoomsBtn">一覧を更新</button></div>
 <div id="roomList"></div>
+<details id="playerManagerPanel" class="settings-panel" style="margin-top:16px;border-top:1px solid #e2e6ee;padding-top:12px"><summary>プレイヤー管理（削除・復活）</summary>
+<p id="playerManagerNotice">登録時に固有IDを発行します。削除しても過去の成績は保持され、復活すると元のIDのまま利用できます。</p>
+<div class="row" style="margin:12px 0"><input id="registerPlayerName" maxlength="40" placeholder="新しいプレイヤー名"><button id="registerPlayerBtn" type="button">登録</button></div>
+<h3 style="font-size:15px">登録中</h3><div id="registeredPlayerList"></div>
+<h3 style="font-size:15px;margin-top:16px">削除済み</h3><div id="archivedPlayerList"></div>
+</details>
  <details class="settings-panel" style="margin-top:18px;border-top:1px solid #e2e6ee;padding-top:12px"><summary>招待コードを直接入力する（予備）</summary>
  <h2>招待コードで閲覧参加</h2><p class="muted">通常はQR・URLから自動参加します。コード入力は予備の方法です。</p>
  <label for="inviteCode">招待コード</label><input id="inviteCode" autocapitalize="off" autocomplete="off" spellcheck="false" placeholder="招待コード">
@@ -135,6 +146,7 @@ const CONFIG_KEY='mahjong-room-lab-public-config'; // Only URL + publishable key
 let client=null,user=null,current=null,revision=null;
 let realtimeChannel=null,realtimeSequence=0,lastSharedPayload=null,pendingInvite=null;
 let sharedEditIndex=null,sharedEditRoom=null,handWriteBusy=false;
+let playerRegistry=[],playerRegistryLoaded=false;
 function show(id,on){$(id).classList.toggle('hide',!on)}
 function notify(msg){$('message').textContent=msg}
 function fail(e){notify(e?.message||String(e))}
@@ -145,7 +157,7 @@ function stopRealtime(){
   $('liveStatus').textContent='自動更新：停止中';
 }
 function resetRoom(){stopRealtime();current=null;revision=null;lastSharedPayload=null;sharedEditIndex=null;sharedEditRoom=null;sharedEditingOriginal=null;$('handInputs').replaceChildren();show('currentBox',false);show('inviteOwnerBox',false);show('matchEditor',false);show('handInputBox',false)}
-function resetAuth(){user=null;show('roomBox',false);resetRoom();$('authStatus').textContent='未ログイン'}
+function resetAuth(){user=null;playerRegistry=[];playerRegistryLoaded=false;show('roomBox',false);resetRoom();$('authStatus').textContent='未ログイン'}
 function inviteInfoFromHash(){const h=new URLSearchParams(location.hash.slice(1));return h.has('invite')?{code:h.get('invite'),project:h.get('project'),key:h.get('key')}:null}
 function clearInviteHash(){history.replaceState(null,'',location.pathname+location.search)}
 function isAnonymousUser(){return !!user?.is_anonymous}
@@ -198,8 +210,9 @@ async function updateAuth(){
  $('authStatus').textContent=user?(isAnonymousUser()?'匿名閲覧者として接続中':'ログイン中：'+(user.email||user.id)):'未ログイン';
  show('roomBox',!!user);show('passwordSetBtn',!!user&&!isAnonymousUser());
  show('createRoomBtn',!!user&&!isAnonymousUser());
+ show('playerManagerPanel',!!user&&!isAnonymousUser());
  if($('navAccountBtn').classList.contains('selected'))show('authBox',!user||!isAnonymousUser());
- if(user){await loadRooms()}else resetRoom();
+ if(user){if(!isAnonymousUser())await loadPlayers();else{playerRegistry=[];playerRegistryLoaded=false;}await loadRooms()}else resetRoom();
 }
 async function signIn(){
  if(!client)return notify('先に接続してください。');
@@ -254,6 +267,55 @@ async function joinInvite(){
  pendingInvite={code};$('joinInviteBtn').disabled=true;
  try{await handlePendingInvite();$('inviteCode').value=''}catch(e){fail(e)}
  finally{$('joinInviteBtn').disabled=false}
+}
+function activePlayers(){return playerRegistry.filter(p=>!p.deleted_at)}
+function ownerPlayerById(id){return playerRegistry.find(p=>p.id===id)}
+function renderPlayerRegistry(){
+ const renderList=(id,players,deleted)=>{
+  $(id).replaceChildren();
+  if(!players.length){$(id).textContent=deleted?'削除済みプレイヤーはいません。':'登録済みプレイヤーはいません。';return}
+  for(const p of players){
+   const row=document.createElement('div');row.className='player-manager-row';
+   const title=document.createElement('div');title.textContent=p.display_name;
+   const meta=document.createElement('small');meta.textContent='ID: '+p.id.slice(0,8)+'…';title.append(meta);
+   const btn=document.createElement('button');btn.className=deleted?'ghost':'danger';btn.textContent=deleted?'復活':'削除';
+   btn.onclick=()=>setPlayerArchived(p.id,!deleted);
+   row.append(title,btn);$(id).append(row);
+  }
+ };
+ renderList('registeredPlayerList',activePlayers(),false);
+ renderList('archivedPlayerList',playerRegistry.filter(p=>!!p.deleted_at),true);
+}
+async function loadPlayers(){
+ if(!client||!user||isAnonymousUser())return;
+ const {data,error}=await client.from('mahjong_players').select('id,display_name,deleted_at,created_at').order('created_at',{ascending:true});
+ if(error){playerRegistryLoaded=false;fail(Error('プレイヤー一覧の読み込みに失敗しました。新SQLを適用してください: '+error.message));return}
+ playerRegistry=data||[];playerRegistryLoaded=true;renderPlayerRegistry();
+}
+async function registerPlayer(){
+ if(!client||!user||isAnonymousUser())return;
+ const name=$('registerPlayerName').value.trim();
+ if(!name||name.length>40)return notify('プレイヤー名は1〜40文字で入力してください。');
+ if(activePlayers().some(p=>p.display_name.toLocaleLowerCase()===name.toLocaleLowerCase()))return notify('同名のプレイヤーが登録中です。');
+ $('registerPlayerBtn').disabled=true;
+ try{
+  const {error}=await client.from('mahjong_players').insert({owner_id:user.id,display_name:name});
+  if(error)throw error;
+  $('registerPlayerName').value='';await loadPlayers();
+  if(current)await refresh();
+  notify('新しい固有IDでプレイヤーを登録しました。');
+ }catch(e){fail(e)}finally{$('registerPlayerBtn').disabled=false}
+}
+async function setPlayerArchived(id,archived){
+ if(!user||isAnonymousUser())return;
+ const p=ownerPlayerById(id);if(!p)return;
+ if(!confirm(archived?'「'+p.display_name+'」を削除済みに移しますか？以前の成績は保持されます。':'「'+p.display_name+'」を復活しますか？以前の成績を引き継ぎます。'))return;
+ try{
+  const {error}=await client.from('mahjong_players').update({deleted_at:archived?new Date().toISOString():null}).eq('id',id);
+  if(error)throw error;
+  await loadPlayers();if(current)await refresh();
+  notify(archived?'削除済みへ移動しました。対局履歴は残ります。':'以前と同じIDで復活しました。');
+ }catch(e){fail(e)}
 }
 async function loadRooms(){
  if(!user)return;
@@ -628,20 +690,37 @@ function renderSharedMatch(payload){
  const inputs=$('matchFields');
  if(m?.hands?.length){inputs.replaceChildren();$('saveMatchBtn').disabled=true;return}
  $('saveMatchBtn').disabled=false;
- // While the editor is being typed, don't overwrite the values on every realtime event.
  if(document.activeElement&&inputs.contains(document.activeElement))return;
  inputs.replaceChildren();
+ const oldWithoutIds=!!m&&!Array.isArray(m.playerIds);
  for(let i=0;i<4;i++){
   const wrap=document.createElement('div');wrap.className='row';wrap.style.marginTop='8px';
   const label=document.createElement('label');label.textContent=seatLabel(i);label.style.width='46px';
-  const name=document.createElement('input');name.id='matchName'+i;name.placeholder=seatLabel(i)+'の名前';name.style.flex='1 1 110px';name.maxLength=40;name.value=m?.names[i]||'';
+  let name;
+  if(oldWithoutIds){
+   name=document.createElement('input');name.id='matchName'+i;name.placeholder=seatLabel(i)+'の名前';name.style.flex='1 1 110px';name.maxLength=40;name.value=m.names[i]||'';
+  }else{
+   name=document.createElement('select');name.id='matchPlayerId'+i;name.className='record-player-select';
+   const placeholder=document.createElement('option');placeholder.value='';placeholder.textContent='登録済みプレイヤーを選択';name.append(placeholder);
+   const selectedId=m?.playerIds?.[i];
+   for(const p of playerRegistry.filter(p=>!p.deleted_at||p.id===selectedId)){
+    const opt=document.createElement('option');opt.value=p.id;opt.textContent=p.display_name+(p.deleted_at?'（削除済み）':'');name.append(opt);
+   }
+   name.value=selectedId||'';
+  }
   const points=document.createElement('input');points.id='matchPoints'+i;points.type='number';points.inputMode='numeric';points.step='100';points.min='-1000000';points.max='1000000';points.style.flex='1 1 95px';points.value=m?.points[i]??25000;
   wrap.append(label,name,points);inputs.append(wrap);
  }
+
 }
 async function saveSharedMatch(){
  if(!current||!user||current.owner_id!==user.id)return notify('編集権限がありません。');
- const names=[0,1,2,3].map(i=>$('matchName'+i)?.value.trim()||'');
+ const oldWithoutIds=!!testMatchFromPayload(lastSharedPayload)&&!Array.isArray(testMatchFromPayload(lastSharedPayload).playerIds);
+ const ids=oldWithoutIds?null:[0,1,2,3].map(i=>$('matchPlayerId'+i)?.value||'');
+ if(!oldWithoutIds&&!playerRegistryLoaded)return notify('プレイヤー一覧を読み込めません。SQLの適用を確認してください。');
+ if(ids&&(ids.some(id=>!id||!ownerPlayerById(id)||!!ownerPlayerById(id).deleted_at)||new Set(ids).size!==4))
+  return notify('登録中の異なるプレイヤーを4人選択してください。未登録ならプレイヤー管理から登録してください。');
+ const names=ids?ids.map(id=>ownerPlayerById(id).display_name):[0,1,2,3].map(i=>$('matchName'+i)?.value.trim()||'');
  const points=[0,1,2,3].map(i=>Number($('matchPoints'+i)?.value));
  let rules;try{rules=readSharedRules()}catch(e){return fail(e)}
  if(names.some(n=>!n||n.length>40)||new Set(names).size!==4)return notify('4人の異なる名前を入力してください。');
@@ -656,7 +735,7 @@ async function saveSharedMatch(){
   // Preserve unrelated fields such as testCounter; edit only the sharedMatch namespace.
   const prior=testMatchFromPayload(data.payload);
   if(prior?.hands?.length||prior?.status==='完了'||prior?.status==='中断')throw Error('開始済み・中断中の半荘はこの編集欄で変更できません。');
-  const sharedMatch={id:prior?.id||Date.now(),title:current.title,date:prior?.date||new Date().toISOString(),names,points,initialPoints:prior?.initialPoints||points.slice(),rules,round:prior?.round||0,dealer:prior?.dealer||0,honba:prior?.honba||0,sticks:prior?.sticks||0,hands:prior?.hands||[],status:prior?.status||'進行中'};
+  const sharedMatch={id:prior?.id||Date.now(),title:current.title,date:prior?.date||new Date().toISOString(),names,...(ids?{playerIds:ids}:{}),points,initialPoints:prior?.initialPoints||points.slice(),rules,round:prior?.round||0,dealer:prior?.dealer||0,honba:prior?.honba||0,sticks:prior?.sticks||0,hands:prior?.hands||[],status:prior?.status||'進行中'};
   const payload={...data.payload,sharedMatch};
   const {error}=await client.rpc('mahjong_write_snapshot',{p_room_id:roomId,p_expected_revision:data.revision,p_payload:payload});
   if(error)throw error;
@@ -735,6 +814,7 @@ $('copyInviteBtn').onclick=async()=>{const v=$('generatedInvite').value;if(!v)re
 $('revokeInviteBtn').onclick=revokeInvites;
 $('signOutBtn').onclick=async()=>{resetRoom();if(client)await client.auth.signOut();await updateAuth()};
 $('createRoomBtn').onclick=createRoom;
+$('registerPlayerBtn').onclick=registerPlayer;
 $('reloadRoomsBtn').onclick=loadRooms;
 $('refreshBtn').onclick=refresh;
 $('incrementBtn').onclick=increment;
