@@ -161,6 +161,10 @@ button.danger{background:#fff0f0;color:#aa2935}
 <label for="migrationBackupFile">バックアップJSON（この端末内でのみ検査）</label>
 <input type="file" id="migrationBackupFile" accept=".json,application/json">
 <button type="button" id="clearMigrationReportBtn" class="ghost" style="margin-top:10px">検査結果を消す</button>
+<div id="migrationDryRunBox" class="hide" style="margin-top:12px">
+<button type="button" id="runMigrationDryRunBtn">データ変換を試験する（保存・送信なし）</button>
+<pre id="migrationDryRunReport" class="readonly" role="status" style="white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px;margin-top:10px">未実行</pre>
+</div>
 <pre id="migrationReport" class="readonly" role="status" style="white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px">バックアップを選択してください。</pre>
 <p class="muted" style="font-size:12px">安全のため、バックアップの個人名や対局内容は検査結果に表示しません。検査に成功してもまだクラウド移行は行いません。</p>
 </section>
@@ -189,6 +193,7 @@ let sharedEditIndex=null,sharedEditRoom=null,handWriteBusy=false;
 let playerRegistry=[],playerRegistryLoaded=false;
 let sharedStatsRows=[],sharedStatsSelectedId=null,sharedStatsBusy=false;
 let matchNameModeRoom=null,matchNameModeIsManual=false;
+let migrationBackupInMemory=null;
 function show(id,on){$(id).classList.toggle('hide',!on)}
 function notify(msg){$('message').textContent=msg}
 function fail(e){notify(e?.message||String(e))}
@@ -530,6 +535,98 @@ function inspectV22Backup(data){
  counts.formats=Array.isArray(data.ruleFormats)?data.ruleFormats.length:0;
  return {ok:issues.length===0,counts,issues,warnings};
 }
+// v3.0 dry-run: transform in memory only; never persist personal names or snapshots.
+function dryRunV22Conversion(data){
+ const inspected=inspectV22Backup(data);
+ if(!inspected.ok)throw Error('事前検査で問題が見つかりました。まずバックアップを確認してください。');
+ const records=[...(data.matches||[]).map(m=>({kind:'completed',m})),
+  ...(data.suspendedMatches||[]).map(m=>({kind:'suspended',m})),
+  ...(data.active?[{kind:'active',m:data.active}]:[])];
+ const known=new Map((data.playerRegistry||[]).map(p=>[p.id,p]));
+ const seen=new Set(),entries=[],blocked=[],warnings=[];
+ for(const {kind,m} of records){
+  const sourceId=String(m.id??'');
+  if(!sourceId){blocked.push('対局IDがない記録は変換候補にできません。');continue;}
+  // Idempotency key is independent of input order. Identical source IDs across
+  // statuses or repeated backups must be handled before an eventual import.
+  const migrationKey='v22-match:'+sourceId;
+  if(seen.has(migrationKey)){blocked.push('同じ対局IDが重複しています。');continue}
+  seen.add(migrationKey);
+  if(m.names.length!==4||m.points.length!==4||!Array.isArray(m.hands)){
+   blocked.push('4人の対局データとして確認できない記録があります。');continue;
+  }
+  const rules=m.rules?null:MATCH_RULES;
+  let resolvedRules;
+  try{resolvedRules=validMatchRules(m.rules||rules)}catch(e){
+   blocked.push('クラウドルールへ変換できない対局があります。');continue;
+  }
+  const ids=validStatsIds(m)?m.playerIds.slice():null;
+  if(!ids)warnings.push('固有IDのない対局があり、人物の自動同定はできません。');
+  else if(ids.some(id=>!known.has(id)))warnings.push('完全削除済みなど、登録情報のないIDを参照する対局があります。');
+  // Original data is kept losslessly in the in-memory candidate for comparison.
+  const candidate={
+   migrationKey,sourceKind:kind,
+   match:{
+    id:m.id,title:m.title||'',date:m.date||'',
+    names:m.names.slice(),...(ids?{playerIds:ids}:{}),
+    points:m.points.slice(),rules:resolvedRules,
+    round:Number(m.round||0),dealer:Number(m.dealer||0),
+    honba:Number(m.honba||0),sticks:Number(m.sticks||0),
+    status:m.status||({completed:'完了',suspended:'中断',active:'進行中'}[kind]),
+    hands:JSON.parse(JSON.stringify(m.hands)),
+    endReason:m.endReason||null,finished:m.finished||null
+   },
+   // Historical v2.22 records retain original hand details and final settlement.
+   original:JSON.parse(JSON.stringify(m))
+  };
+  // A future importer must not call replaySharedHands() for converted history
+  // until exact rules/outcomes and initial state are compatibility-validated.
+  const sourceDelta=m.hands.reduce((sum,h)=>{
+   if(!Array.isArray(h.delta)||h.delta.length!==4)return sum;
+   for(let i=0;i<4;i++)sum[i]+=h.delta[i];
+   return sum;
+  },[0,0,0,0]);
+  candidate.match.initialPoints=m.initialPoints?.slice?.()||
+   m.points.map((v,i)=>v-sourceDelta[i]);
+  if(candidate.match.initialPoints.some(v=>!Number.isSafeInteger(v))){
+   blocked.push('開始点数を復元できない対局があります。');continue;
+  }
+  entries.push(candidate);
+ }
+ const keys=new Set(entries.map(x=>x.migrationKey));
+ const sourceCounts={completed:records.filter(x=>x.kind==='completed').length,
+  suspended:records.filter(x=>x.kind==='suspended').length,active:records.filter(x=>x.kind==='active').length};
+ return {
+  ok:blocked.length===0&&entries.length===records.length&&keys.size===entries.length,
+  candidates:entries,blocked,warnings:[...new Set(warnings)],
+  sourceCounts,total:records.length,ready:entries.length,
+  handCount:entries.reduce((n,x)=>n+x.match.hands.length,0),
+  registered:(data.playerRegistry||[]).length,
+  deleted:(data.playerRegistry||[]).filter(p=>p.deleted).length,
+  noIds:entries.filter(x=>!Array.isArray(x.match.playerIds)).length,
+  keyCount:keys.size
+ };
+}
+function formatMigrationDryRun(result){
+ return (result.ok?'変換候補の作成に成功（クラウド移行は未実施）':'変換候補の作成に問題があります。')+
+ '\n対象：'+result.total+'半荘 / 変換候補：'+result.ready+'半荘 / ブロック：'+result.blocked.length+'件'+
+ '\n内訳：完了 '+result.sourceCounts.completed+'・中断 '+result.sourceCounts.suspended+'・進行中 '+result.sourceCounts.active+
+ '\n局履歴：'+result.handCount+'局 / プレイヤー登録情報：'+result.registered+'件（削除済み '+result.deleted+'件）'+
+ '\n重複判定用キー：'+result.keyCount+'件 / ID未設定：'+result.noIds+'半荘'+
+ (result.blocked.length?'\n問題：'+result.blocked.slice(0,10).join(' / '):'')+
+ (result.warnings.length?'\n注意：'+result.warnings.slice(0,10).join(' / '):'')+
+ '\n\n※変換候補はこの画面のメモリ上だけに存在します。アップロード・保存・既存データ変更なし。'+
+ '\n※完全な移行には、履歴・固有ID・ルール互換性とクラウド側重複確認の追加実装が必要です。';
+}
+function executeMigrationDryRun(){
+ const report=$('migrationDryRunReport');
+ if(!migrationBackupInMemory){report.textContent='先にバックアップJSONを読み込んでください。';return}
+ try{
+  const result=dryRunV22Conversion(migrationBackupInMemory);
+  report.textContent=formatMigrationDryRun(result);
+  // Avoid retaining multiple personal-data-rich candidate copies in application memory.
+ }catch(e){report.textContent='変換試験に失敗：'+(e?.message||String(e))}
+}
 function formatMigrationReport(result){
  const c=result.counts||{};
  return (result.ok?'検査完了：基本形式に重大な問題は見つかりませんでした。':'検査結果：修正が必要な問題があります。')+
@@ -546,13 +643,16 @@ function formatMigrationReport(result){
 async function checkMigrationBackupFile(){
  const input=$('migrationBackupFile'),file=input.files?.[0];
  if(!file)return;
+ migrationBackupInMemory=null;show('migrationDryRunBox',false);
  const output=$('migrationReport');
  output.textContent='ローカルで検査しています…';
  try{
   if(file.size>25*1024*1024)throw Error('25MBを超えるバックアップはこの画面では検査できません。');
   const text=await file.text();
-  const result=inspectV22Backup(JSON.parse(text));
+  const parsed=JSON.parse(text);
+  const result=inspectV22Backup(parsed);
   output.textContent=formatMigrationReport(result);
+  if(result.ok){migrationBackupInMemory=parsed;show('migrationDryRunBox',true)}
  }catch(e){output.textContent='ファイルを検査できません：'+(e?.message||String(e))}
  finally{input.value=''}
 }
@@ -1142,7 +1242,8 @@ $('createRoomBtn').onclick=createRoom;
 $('registerPlayerBtn').onclick=registerPlayer;
 $('applySharedStatsBtn').onclick=loadSharedStats;
 $('migrationBackupFile').onchange=checkMigrationBackupFile;
-$('clearMigrationReportBtn').onclick=()=>{$('migrationReport').textContent='バックアップを選択してください。';$('migrationBackupFile').value=''};
+$('clearMigrationReportBtn').onclick=()=>{migrationBackupInMemory=null;show('migrationDryRunBox',false);$('migrationDryRunReport').textContent='未実行';$('migrationReport').textContent='バックアップを選択してください。';$('migrationBackupFile').value=''};
+$('runMigrationDryRunBtn').onclick=executeMigrationDryRun;
 $('runDevChecksBtn').onclick=()=>{
  const result=runDevChecks();
  $('devChecksResult').textContent=result.message;
