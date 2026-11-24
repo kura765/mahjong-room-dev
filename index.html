@@ -473,6 +473,16 @@ function runDevChecks(){
   const conflict=compareMigrationInventory(dry,[{id:'room-conflict'}],
    [{room_id:'room-conflict',payload:{sharedMatch:{...original,migrationKey:dry.candidates[0].migrationKey,points:[27000,23000,25000,25000]}}}]);
   assert('キー衝突時に内容不一致を検出',conflict.conflict.length===1);
+  const packet=makeV22ReadonlyImportPayload(dry.candidates[0]);
+  assert('DB用の読み取り専用形式を作成',packet.migrationFormat==='v22-readonly'&&
+   packet.sharedMatch.migratedReadOnly===true&&packet.migrationKey===dry.candidates[0].migrationKey);
+  assert('元の局履歴を変えずに保持',
+   JSON.stringify(packet.sharedMatch.hands)===JSON.stringify(packet.legacyOriginal.hands));
+  let rejectsChangedSource=false;
+  try{makeV22ReadonlyImportPayload({...dry.candidates[0],
+   match:{...dry.candidates[0].match,points:[1,2,3,4]}})}
+  catch(e){rejectsChangedSource=true}
+  assert('移行時の原記録改変を拒否',rejectsChangedSource);
   return {ok:true,checks:summary.length,message:summary.join('\n')+'\nすべて成功（'+summary.length+'項目）'};
  }catch(e){return {ok:false,checks:summary.length,message:summary.join('\n')+'\n✕ '+(e?.message||String(e))}}
 }
@@ -610,6 +620,8 @@ function dryRunV22Conversion(data){
   if(candidate.match.initialPoints.some(v=>!Number.isSafeInteger(v))){
    blocked.push('開始点数を復元できない対局があります。');continue;
   }
+  try{makeV22ReadonlyImportPayload(candidate)}
+  catch(e){blocked.push('安全な移行形式に変換できない対局があります：'+e.message);continue}
   entries.push(candidate);
  }
  const keys=new Set(entries.map(x=>x.migrationKey));
@@ -727,6 +739,30 @@ async function compareMigrationCloud(){
   out.textContent=formatMigrationCloudReport(report);
  }catch(e){out.textContent='クラウド照合に失敗：'+(e?.message||String(e))}
  finally{migrationCloudScanBusy=false;$('compareMigrationCloudBtn').disabled=false}
+}
+// Strict payload envelope for the planned server-side import RPC.
+// This is a pure in-memory builder: NO network or storage writes.
+function makeV22ReadonlyImportPayload(candidate){
+ if(!candidate||typeof candidate.migrationKey!=='string'||
+    !/^v22-match:[a-zA-Z0-9_-]{1,100}$/.test(candidate.migrationKey))
+  throw Error('移行元IDがDB側の受入形式に合いません。');
+ if(!candidate.original||!candidate.match||
+    String(candidate.original.id)!==candidate.migrationKey.slice(10)||
+    String(candidate.match.id)!==String(candidate.original.id))
+  throw Error('変換元の対局IDが一致しません。');
+ const m=candidate.match,old=candidate.original;
+ const equal=(a,b)=>JSON.stringify(a)===JSON.stringify(b);
+ if(!equal(m.names,old.names)||!equal(m.points,old.points)||
+    !equal(m.hands,old.hands)||!equal(m.playerIds??null,old.playerIds??null))
+  throw Error('元データと変換結果が異なります。移行を停止してください。');
+ if(!m.date||!/^\d{4}-\d{2}-\d{2}/.test(m.date)||
+    !['完了','無効','中断','進行中'].includes(m.status))
+  throw Error('移行する対局日または状態が不正です。');
+ const sharedMatch=JSON.parse(JSON.stringify({
+  ...m,migrationKey:candidate.migrationKey,migratedReadOnly:true
+ }));
+ return {migrationFormat:'v22-readonly',migrationKey:candidate.migrationKey,
+  sharedMatch,legacyOriginal:JSON.parse(JSON.stringify(old))};
 }
 function formatMigrationDryRun(result){
  return (result.ok?'変換候補の作成に成功（クラウド移行は未実施）':'変換候補の作成に問題があります。')+
