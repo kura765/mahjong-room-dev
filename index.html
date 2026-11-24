@@ -17,7 +17,7 @@ button.ghost{background:#e9efff;color:#2155bb}button:disabled{opacity:.5;cursor:
 .meta{font-size:12px;color:#667085}.readonly{background:#f7f8fa;padding:10px;border-radius:8px}
 </style></head>
 <body><main>
-<h1>共有ルーム開発ラボ</h1><p class="muted">v3.0試験用：本番の対局・ローカル記録とは分離されています。</p>
+<h1>共有ルーム開発ラボ</h1><p class="muted">v3.0 共通QR招待テスト（Supabase側の新SQL適用が必要）</p><p class="muted">v3.0試験用：本番の対局・ローカル記録とは分離されています。</p>
 <section><h2>開発プロジェクトに接続</h2><p class="muted">SupabaseのProject URLと公開用（publishable / anon）キーのみ使用。service_roleやsecretキーは絶対に入力しないでください。</p>
 <label for="projectUrl">Project URL</label><input id="projectUrl" placeholder="https://xxxxx.supabase.co" autocomplete="off">
 <label for="publicKey">Publishable key / anon key</label><input id="publicKey" placeholder="sb_publishable_... または公開anonキー" autocomplete="off">
@@ -38,7 +38,7 @@ button.ghost{background:#e9efff;color:#2155bb}button:disabled{opacity:.5;cursor:
 <div class="row" style="margin-top:12px"><button id="createRoomBtn">テストルームを作成</button><button class="ghost" id="reloadRoomsBtn">一覧を更新</button></div>
 <div id="roomList"></div>
  <div style="margin-top:18px;border-top:1px solid #e2e6ee;padding-top:12px">
- <h2>招待コードで閲覧参加</h2><p class="muted">受け取った64文字のコードを入力してください。参加後は閲覧のみ可能です。</p>
+ <h2>招待コードで閲覧参加</h2><p class="muted">通常はQR・URLから自動参加します。コード入力は予備の方法です。</p>
  <label for="inviteCode">招待コード</label><input id="inviteCode" autocapitalize="off" autocomplete="off" spellcheck="false" placeholder="招待コード">
  <div class="row" style="margin-top:10px"><button id="joinInviteBtn" class="ghost">閲覧者として参加</button></div>
  </div></section>
@@ -64,10 +64,12 @@ button.ghost{background:#e9efff;color:#2155bb}button:disabled{opacity:.5;cursor:
  <p id="liveStatus" class="muted" role="status">自動更新：停止中</p>
 <div class="row" style="margin-top:12px"><button id="incrementBtn">テスト用カウントを＋1</button><button class="ghost" id="refreshBtn">再読み込み</button></div>
  <div id="inviteOwnerBox" class="hide" style="margin-top:18px;border-top:1px solid #e2e6ee;padding-top:12px">
- <h2>閲覧者を招待</h2><p class="muted">48時間有効・1回限りの招待コードを発行します。コードを知った人は閲覧者として参加できるため、相手だけに伝えてください。</p>
- <button id="createInviteBtn" class="ghost">招待コードを発行</button>
- <label for="generatedInvite">発行したコード（再表示できません）</label><input id="generatedInvite" readonly autocomplete="off" placeholder="発行すると表示されます">
- <button id="copyInviteBtn" class="ghost" style="margin-top:8px">コードを選択</button>
+ <h2>QRコード・招待URL</h2><p class="muted">共通QRで複数人が参加できます。新規参加は発行後24時間まで。参加済みの人の権限は維持されます。中断後の再開時もここから再発行できます。</p>
+ <button id="createInviteBtn" class="ghost">新しい招待QRを発行・再発行</button>
+ <div id="inviteQr" style="margin:12px auto;max-width:280px;text-align:center"></div>
+ <label for="generatedInvite">招待URL</label><input id="generatedInvite" readonly autocomplete="off" placeholder="発行すると表示されます">
+ <div class="row" style="margin-top:8px"><button id="copyInviteBtn" class="ghost">招待URLをコピー</button><button id="revokeInviteBtn" class="ghost">有効な招待URLを停止</button></div>
+ <p class="muted">URLを知る人は期限内に閲覧参加できます。招待の停止は参加済みの人には影響しません。</p>
  </div>
 <p class="muted">この段階では本物の局結果を編集しません。更新権限と競合対策だけの検証です。</p>
 </section>
@@ -78,7 +80,7 @@ import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js
 const $=id=>document.getElementById(id);
 const CONFIG_KEY='mahjong-room-lab-public-config'; // Only URL + publishable key, never credentials
 let client=null,user=null,current=null,revision=null;
-let realtimeChannel=null,realtimeSequence=0,lastSharedPayload=null;
+let realtimeChannel=null,realtimeSequence=0,lastSharedPayload=null,pendingInvite=null;
 function show(id,on){$(id).classList.toggle('hide',!on)}
 function notify(msg){$('message').textContent=msg}
 function fail(e){notify(e?.message||String(e))}
@@ -90,6 +92,18 @@ function stopRealtime(){
 }
 function resetRoom(){stopRealtime();current=null;revision=null;lastSharedPayload=null;$('handInputs').replaceChildren();show('currentBox',false);show('inviteOwnerBox',false);show('matchEditor',false);show('handInputBox',false)}
 function resetAuth(){user=null;show('roomBox',false);resetRoom();$('authStatus').textContent='未ログイン'}
+function inviteInfoFromHash(){const h=new URLSearchParams(location.hash.slice(1));return h.has('invite')?{code:h.get('invite'),project:h.get('project'),key:h.get('key')}:null}
+function clearInviteHash(){history.replaceState(null,'',location.pathname+location.search)}
+function isAnonymousUser(){return !!user?.is_anonymous}
+async function handlePendingInvite(){
+ if(!pendingInvite||!client)return;
+ if(!user){const {data,error}=await client.auth.signInAnonymously();if(error)throw Error('匿名参加できません。SupabaseのAnonymous Sign-ins設定を確認してください: '+error.message);user=data.user}
+ const code=pendingInvite.code;
+ if(!/^[a-f0-9]{64}$/.test(code))throw Error('招待URLの形式が不正です。');
+ const {data,error}=await client.rpc('mahjong_join_shared_invite',{p_code:code});
+ if(error)throw error;
+ pendingInvite=null;clearInviteHash();await updateAuth();await openRoom(data);notify('閲覧者として参加しました。');
+}
 function validateConfig(){
  // Supabase's Data API page may copy a REST endpoint ending in /rest/v1.
  // The SDK requires the base project origin; normalize that endpoint automatically.
@@ -118,7 +132,8 @@ async function connect(){
   show('authBox',true);
   const {data,error}=await client.auth.getUser();if(error&&error.name!=='AuthSessionMissingError')throw error;
   user=data?.user||null;await updateAuth();
-  notify('開発プロジェクトに接続しました。');
+  if(pendingInvite)await handlePendingInvite();
+  else notify('開発プロジェクトに接続しました。');
  }catch(e){fail(e)}
 }
 async function updateAuth(){
@@ -126,8 +141,10 @@ async function updateAuth(){
  const {data,error}=await client.auth.getUser();
  if(error&&error.name!=='AuthSessionMissingError'){fail(error);resetAuth();return}
  user=data?.user||null;
- $('authStatus').textContent=user?'ログイン中：'+(user.email||user.id):'未ログイン';
- show('roomBox',!!user);show('passwordSetBtn',!!user);
+ $('authStatus').textContent=user?(isAnonymousUser()?'匿名閲覧者として接続中':'ログイン中：'+(user.email||user.id)):'未ログイン';
+ show('roomBox',!!user);show('passwordSetBtn',!!user&&!isAnonymousUser());
+ show('createRoomBtn',!!user&&!isAnonymousUser());
+ show('authBox',!user||!isAnonymousUser());
  if(user){await loadRooms()}else resetRoom();
 }
 async function signIn(){
@@ -154,27 +171,35 @@ async function setPassword(){
  $('password').value='';notify('パスワードを設定しました。次回からメールなしでログインできます。');
 }
 async function createInvite(){
- if(!current||current.owner_id!==user?.id)return notify('作成者だけが招待できます。');
+ if(!current||current.owner_id!==user?.id||isAnonymousUser())return notify('招待は作成者のみ発行可能です。');
  $('createInviteBtn').disabled=true;
  try{
-  const {data,error}=await client.rpc('mahjong_create_viewer_invite',{p_room_id:current.id});
-  if(error)throw error;
-  $('generatedInvite').value=data;
-  notify('招待コードを発行しました。信頼できる相手にのみ伝えてください。');
+  const {data,error}=await client.rpc('mahjong_create_shared_invite',{p_room_id:current.id});if(error)throw error;
+  const link=new URL(location.pathname,location.origin);
+  link.hash=new URLSearchParams({invite:data,project:$('projectUrl').value.trim(),key:$('publicKey').value.trim()}).toString();
+  $('generatedInvite').value=link.toString();
+  const target=$('inviteQr');target.replaceChildren();
+  try{
+   const lib=await import('https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/+esm');
+   const create=lib.default||lib;const qr=create(0,'M');qr.addData(link.toString());qr.make();
+   target.innerHTML=qr.createSvgTag({cellSize:4,margin:2});
+   const svg=target.querySelector('svg');if(svg){svg.style.maxWidth='100%';svg.setAttribute('aria-label','招待QRコード')}
+  }catch(e){target.textContent='QRコードの表示に失敗しました。招待URLをコピーして共有してください。'}
+  notify('24時間有効の共通招待URLを発行しました。');
  }catch(e){fail(e)}finally{$('createInviteBtn').disabled=false}
 }
+async function revokeInvites(){
+ if(!current||current.owner_id!==user?.id||isAnonymousUser())return;
+ if(!confirm('この部屋の有効な招待URLをすべて無効にしますか？参加済みの友人の閲覧権限は残ります。'))return;
+ try{const {error}=await client.rpc('mahjong_revoke_shared_invites',{p_room_id:current.id});if(error)throw error;$('generatedInvite').value='';$('inviteQr').replaceChildren();notify('有効な招待URLを停止しました。')}
+ catch(e){fail(e)}
+}
 async function joinInvite(){
- if(!client||!user)return notify('先にログインしてください。');
- const code=$('inviteCode').value.trim().toLowerCase();
- if(!/^[a-f0-9]{64}$/.test(code))return notify('64文字の招待コードを入力してください。');
- $('joinInviteBtn').disabled=true;
- try{
-  const {data,error}=await client.rpc('mahjong_accept_viewer_invite',{p_code:code});
-  if(error)throw error;
-  $('inviteCode').value='';
-  await loadRooms();await openRoom(data);
-  notify('閲覧者として参加しました。');
- }catch(e){fail(e)}finally{$('joinInviteBtn').disabled=false}
+ if(!client)return notify('接続してください。');
+ const code=$('inviteCode').value.trim().toLowerCase();if(!/^[a-f0-9]{64}$/.test(code))return notify('64文字のコードを入力してください。');
+ pendingInvite={code};$('joinInviteBtn').disabled=true;
+ try{await handlePendingInvite();$('inviteCode').value=''}catch(e){fail(e)}
+ finally{$('joinInviteBtn').disabled=false}
 }
 async function loadRooms(){
  if(!user)return;
@@ -191,7 +216,7 @@ async function loadRooms(){
  }
 }
 async function createRoom(){
- if(!user)return;
+ if(!user||isAnonymousUser())return notify('作成者としてログインしてください。');
  const title=$('roomTitle').value.trim();if(!title||title.length>100)return notify('部屋名を1〜100文字で入力してください。');
  $('createRoomBtn').disabled=true;
  try{
@@ -420,7 +445,7 @@ async function openRoom(id){
  $('currentMeta').textContent=room.owner_id===user.id?'作成者（編集可）':'参加者（閲覧のみ）';
  $('incrementBtn').disabled=room.owner_id!==user.id;
  show('matchEditor',room.owner_id===user.id);
- show('inviteOwnerBox',room.owner_id===user.id);$('generatedInvite').value='';
+ show('inviteOwnerBox',room.owner_id===user.id&&!isAnonymousUser());$('generatedInvite').value='';$('inviteQr').replaceChildren();
  await refresh();
  subscribeToRoom(room.id);
 }
@@ -477,7 +502,8 @@ $('passwordLoginBtn').onclick=passwordLogin;
 $('passwordSetBtn').onclick=setPassword;
 $('createInviteBtn').onclick=createInvite;
 $('joinInviteBtn').onclick=joinInvite;
-$('copyInviteBtn').onclick=()=>{$('generatedInvite').focus();$('generatedInvite').select();notify('コードを選択しました。コピーして相手だけに送ってください。')};
+$('copyInviteBtn').onclick=async()=>{const v=$('generatedInvite').value;if(!v)return notify('招待URLを発行してください。');try{await navigator.clipboard.writeText(v);notify('招待URLをコピーしました。')}catch(e){$('generatedInvite').select();notify('URLを選択しました。コピーして共有してください。')}};
+$('revokeInviteBtn').onclick=revokeInvites;
 $('signOutBtn').onclick=async()=>{resetRoom();if(client)await client.auth.signOut();await updateAuth()};
 $('createRoomBtn').onclick=createRoom;
 $('reloadRoomsBtn').onclick=loadRooms;
@@ -486,5 +512,8 @@ $('incrementBtn').onclick=increment;
 $('saveMatchBtn').onclick=saveSharedMatch;
 $('handType').onchange=makeHandControls;
 $('commitSharedHandBtn').onclick=commitSharedHand;
-try{const saved=JSON.parse(localStorage.getItem(CONFIG_KEY)||'null');if(saved&&saved.url&&saved.key){$('projectUrl').value=saved.url;$('publicKey').value=saved.key;connect()}}catch(e){/* Invalid saved config: manual connection remains available. */}
+pendingInvite=inviteInfoFromHash();
+if(pendingInvite?.project&&pendingInvite?.key){$('projectUrl').value=pendingInvite.project;$('publicKey').value=pendingInvite.key;connect()}
+else{try{const saved=JSON.parse(localStorage.getItem(CONFIG_KEY)||'null');if(saved&&saved.url&&saved.key){$('projectUrl').value=saved.url;$('publicKey').value=saved.key;connect()}}catch(e){/* Manual configuration available */}}
+
 </script></body></html>
