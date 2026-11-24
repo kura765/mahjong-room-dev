@@ -456,6 +456,23 @@ function runDevChecks(){
   assert('成績集計のポイント総和',Math.abs(results.reduce((t,p)=>t+p.score,0))<1e-6);
   const recent=sharedStatsOfMatches(games,players,'global',1);
   assert('全体の直近N半荘を抽出',recent.every(p=>p.legacy)&&recent.length===4);
+  const migrationSource={players:base.names.slice(),
+   playerRegistry:base.names.map((name,i)=>({id:base.playerIds[i],name,deleted:false})),
+   matches:[{...full,id:101}],active:null,suspendedMatches:[]};
+  const dry=dryRunV22Conversion(migrationSource);
+  assert('移行前の変換候補を作成',dry.ok&&dry.candidates.length===1);
+  const fresh=compareMigrationInventory(dry,[],[]);
+  assert('クラウド未登録候補を識別',fresh.new.length===1);
+  const original=dry.candidates[0].match;
+  const imported=compareMigrationInventory(dry,[{id:'room-existing'}],
+   [{room_id:'room-existing',payload:{sharedMatch:{...original,migrationKey:dry.candidates[0].migrationKey}}}]);
+  assert('同じキー・同じ内容を検出',imported.imported.length===1);
+  const ambiguous=compareMigrationInventory(dry,[{id:'room-unmarked'}],
+   [{room_id:'room-unmarked',payload:{sharedMatch:original}}]);
+  assert('キーがない旧ルームを要確認にする',ambiguous.needsReview.length===1);
+  const conflict=compareMigrationInventory(dry,[{id:'room-conflict'}],
+   [{room_id:'room-conflict',payload:{sharedMatch:{...original,migrationKey:dry.candidates[0].migrationKey,points:[27000,23000,25000,25000]}}}]);
+  assert('キー衝突時に内容不一致を検出',conflict.conflict.length===1);
   return {ok:true,checks:summary.length,message:summary.join('\n')+'\nすべて成功（'+summary.length+'項目）'};
  }catch(e){return {ok:false,checks:summary.length,message:summary.join('\n')+'\n✕ '+(e?.message||String(e))}}
 }
