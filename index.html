@@ -351,7 +351,8 @@ const MATCH_RULES={start:25000,return:30000,uma:[10,5,-5,-10],oka:20,threshold:3
 function validMatchRules(x){
  const r={...MATCH_RULES,...(x||{})};
  if(!Array.isArray(r.uma)||r.uma.length!==4||[r.start,r.return,r.threshold,r.oka,...r.uma].some(v=>!Number.isSafeInteger(v))||typeof r.tobi!=='boolean')throw Error('半荘ルールの入力を確認してください。');
- if(r.start<1000||r.start>100000||r.return<1000||r.return>100000||r.threshold<1000||r.threshold>100000||r.uma.some(n=>n<-100||n>100)||r.oka<-100||r.oka>100)throw Error('ルールの数値が範囲外です。');
+ if([r.start,r.return,r.threshold].some(n=>n<1000||n>100000||n%1000!==0)||r.uma.some(n=>n<-100||n>100)||r.oka<-100||r.oka>100)throw Error('ルールの数値が範囲外です。');
+ if(r.oka!==(r.return-r.start)*4/1000)throw Error('オカは（返し点−開始点）×4÷1,000と一致させてください。');
  if(r.uma.reduce((sum,n)=>sum+n,0)!==0)throw Error('ウマの合計を0にしてください。');
  return r;
 }
@@ -361,6 +362,8 @@ function readSharedRules(){
   uma:[1,2,3,4].map(i=>get('Uma'+i)),tobi:$('sharedRuleTobi')?.checked??true});
 }
 function renderSharedRules(m,editable){
+ const focus=document.activeElement;
+ if(focus&&$('sharedRules').contains(focus))return;
  const r=validMatchRules(m?.rules||MATCH_RULES);
  const vals=[['Start','開始点',r.start],['Return','返し点',r.return],['Threshold','終了条件点',r.threshold],['Oka','オカ',r.oka],...r.uma.map((v,i)=>['Uma'+(i+1),(i+1)+'位ウマ',v])];
  $('sharedRules').innerHTML=vals.map(([key,label,value])=>'<label>'+label+'<input id="sharedRule'+key+'" type="number" value="'+value+'" '+(editable?'':'disabled')+'></label>').join('')+
@@ -368,7 +371,9 @@ function renderSharedRules(m,editable){
 }
 function settlementPreview(m){
  const r=validMatchRules(m.rules||MATCH_RULES);
- const order=rankIndices(m.points),points=m.points;
+ const points=m.points.slice(),rankOrder=rankIndices(points);
+ points[rankOrder[0]]+=Number(m.sticks||0)*1000;
+ const order=rankIndices(points);
  return order.map((seat,index)=>({
   name:m.names[seat],rank:index+1,points:points[seat],
   score:(points[seat]-r.return)/1000+r.uma[index]+(index===0?r.oka:0)
@@ -407,6 +412,7 @@ async function commitSharedHand(){
  try{
   const {data,error:readError}=await client.from('mahjong_room_snapshots').select('revision,payload').eq('room_id',roomId).single();
   if(readError)throw readError;
+  if(current?.id!==roomId)throw Error('別の半荘が選択されました。');
   const m=testMatchFromPayload(data.payload);
   if(!m)throw Error('先に4人の対局情報を共有保存してください。');
   if(m.status==='完了'||m.status==='中断')throw Error('記録を再開してから入力してください。');
@@ -434,6 +440,7 @@ async function setSharedMatchStatus(next){
  const id=current.id;
  const {data,error}=await client.from('mahjong_room_snapshots').select('revision,payload').eq('room_id',id).single();
  if(error)return fail(error);
+ if(current?.id!==id)return;
  const m=testMatchFromPayload(data.payload);if(!m)return notify('対局情報を登録してください。');
  if(m.status==='完了')return notify('完了済み半荘は変更できません。');
  if(next==='完了'&&!confirm('半荘を終了し、記録を確定しますか？終了すると再開できません。'))return;
@@ -465,7 +472,6 @@ function renderSharedMatch(payload){
  $('sharedStandings').textContent=m?settlementPreview(m).map(x=>x.rank+'位 '+x.name+'　'+x.points.toLocaleString('ja-JP')+'点　'+(x.score>=0?'+':'')+x.score.toFixed(1)+'pt').join('\n'):'';
  if(!owner)return;
  renderSharedRules(m,!m?.hands?.length);
- if(!owner)return;
  makeHandControlsIfNeeded(m);
  const inputs=$('matchFields');
  if(m?.hands?.length){inputs.replaceChildren();$('saveMatchBtn').disabled=true;return}
@@ -494,6 +500,7 @@ async function saveSharedMatch(){
  try{
   const {data,error:readError}=await client.from('mahjong_room_snapshots').select('revision,payload').eq('room_id',roomId).single();
   if(readError)throw readError;
+  if(current?.id!==roomId)throw Error('別の半荘が選択されました。');
   // Preserve unrelated fields such as testCounter; edit only the sharedMatch namespace.
   const prior=testMatchFromPayload(data.payload);
   if(prior?.hands?.length||prior?.status==='完了'||prior?.status==='中断')throw Error('開始済み・中断中の半荘はこの編集欄で変更できません。');
