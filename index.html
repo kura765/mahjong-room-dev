@@ -839,7 +839,7 @@ function renderSharedMatch(payload){
   const label=document.createElement('label');label.textContent=seatLabel(i);label.style.width='46px';
   let name;
   if(manualNames){
-   name=document.createElement('input');name.id='matchName'+i;name.placeholder=seatLabel(i)+'の名前';name.style.flex='1 1 110px';name.maxLength=40;name.value=m.names[i]||'';
+   name=document.createElement('input');name.id='matchName'+i;name.placeholder=seatLabel(i)+'の名前';name.style.flex='1 1 110px';name.maxLength=40;name.value=m?.names?.[i]||'';
   }else{
    name=document.createElement('select');name.id='matchPlayerId'+i;name.className='record-player-select';
    const placeholder=document.createElement('option');placeholder.value='';placeholder.textContent='登録済みプレイヤーを選択';name.append(placeholder);
