@@ -15,6 +15,16 @@ button.ghost{background:#e9efff;color:#2155bb}button:disabled{opacity:.5;cursor:
 #message{white-space:pre-wrap;background:#edf4ff;color:#184680;padding:12px;border-radius:9px}
 .room{border-top:1px solid #e2e6ee;padding:14px 0}
 .meta{font-size:12px;color:#667085}.readonly{background:#f7f8fa;padding:10px;border-radius:8px}
+.room-choice{display:block;width:100%;background:#f0f4fd;color:#183d89;text-align:left;margin:8px 0;white-space:normal}
+.room-choice.selected{outline:2px solid #2563eb;background:#e1ebff}
+.room-choice small{display:block;color:#56637c;margin-top:2px}
+#sharedMatchView{font-variant-numeric:tabular-nums}
+#sharedHistory .room{padding:8px 0;font-size:13px}
+.rule-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+.rule-grid label{margin:0}.rule-grid input{width:100%}
+.shared-actions{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0}
+.shared-actions button{flex:1 1 120px}
+button.danger{background:#fff0f0;color:#aa2935}
 </style></head>
 <body><main>
 <h1>共有ルーム開発ラボ</h1><p class="muted">v3.0 共通QR招待テスト（Supabase側の新SQL適用が必要）</p><p class="muted">v3.0試験用：本番の対局・ローカル記録とは分離されています。</p>
@@ -32,8 +42,8 @@ button.ghost{background:#e9efff;color:#2155bb}button:disabled{opacity:.5;cursor:
  <div class="row" style="margin-top:10px"><button class="ghost" id="passwordLoginBtn">パスワードでログイン</button><button id="passwordSetBtn" class="hide">ログイン用パスワードを設定・変更</button></div>
  </div>
 </section>
-<section id="roomBox" class="hide"><h2>テストルーム</h2>
-<p class="muted">最初は架空のテストデータだけを使います。招待コードとリアルタイム通知を試験中です。自動更新にはSupabase側でRealtime用SQLを実行してください。</p>
+<section id="roomBox" class="hide"><h2>記録する共有半荘を選択</h2>
+<p class="muted">半荘名をタップすると記録を開き、選択中の半荘をもう一度タップすると閉じます。共有データはクラウドに保存されます。</p>
 <label for="roomTitle">部屋名</label><input id="roomTitle" value="動作確認用の半荘">
 <div class="row" style="margin-top:12px"><button id="createRoomBtn">テストルームを作成</button><button class="ghost" id="reloadRoomsBtn">一覧を更新</button></div>
 <div id="roomList"></div>
@@ -43,12 +53,12 @@ button.ghost{background:#e9efff;color:#2155bb}button:disabled{opacity:.5;cursor:
  <div class="row" style="margin-top:10px"><button id="joinInviteBtn" class="ghost">閲覧者として参加</button></div>
  </div></section>
 <section id="currentBox" class="hide"><h2 id="currentTitle">選択中のルーム</h2>
-<div class="meta" id="currentMeta"></div>
+<div class="meta" id="currentMeta"></div><div class="shared-actions"><button id="pauseSharedBtn" class="ghost">半荘を中断する</button><button id="resumeSharedBtn" class="ghost hide">半荘を再開する</button><button id="finishSharedBtn" class="danger">半荘を終了する</button></div>
 <div class="readonly" id="snapshotView" style="white-space:pre-wrap"></div>
  <div style="margin-top:16px;border-top:1px solid #e2e6ee;padding-top:12px">
- <h2>対局データ共有プレビュー</h2>
- <p class="muted">v2.9と同じ基本形式（4人の名前・持ち点）を利用した共有テストです。実際の局結果の入力・点数計算はまだ接続していません。</p>
- <div class="readonly" id="sharedMatchView" style="white-space:pre-wrap">対局データはまだありません。</div>
+ <h2>共有半荘の記録</h2>
+ <p class="muted">入力した局はクラウドに保存され、参加者の画面にも自動反映されます。記録の編集・取り消しは現在未対応です。</p>
+ <div class="readonly" id="sharedMatchView" style="white-space:pre-wrap">対局データはまだありません。</div><details style="margin-top:12px"><summary>局ごとの履歴・成績を表示</summary><div id="sharedHistory"></div><div id="sharedStandings" class="readonly"></div></details>
 <div id="handInputBox" class="hide" style="margin-top:14px;border-top:1px solid #e2e6ee;padding-top:12px">
 <h2>局結果を入力（試験版）</h2><p class="muted">v2.9の点数計算を利用します。保存後は取り消し・編集できない試験版です。架空のテストルームでのみ使用してください。</p>
 <label for="handType">結果</label><select id="handType"><option value="ron">ロン</option><option value="tsumo">ツモ</option><option value="draw">流局</option><option value="intermediate">途中流局</option></select>
@@ -56,8 +66,9 @@ button.ghost{background:#e9efff;color:#2155bb}button:disabled{opacity:.5;cursor:
 <button id="commitSharedHandBtn" style="margin-top:12px">局結果を計算して共有保存</button>
 </div>
  <div id="matchEditor" class="hide">
- <p class="muted">作成者だけがテスト値を保存できます。既存のv2.9記録には影響しません。</p>
+ <p class="muted">作成者だけが半荘を編集できます。局を記録し始めた後は、プレイヤー名・初期持ち点・ルールを変更できません。</p>
  <div id="matchFields"></div>
+ <details id="sharedRulesDetails" style="margin:12px 0"><summary>半荘ルールを設定（開始前のみ）</summary><div class="rule-grid" id="sharedRules"></div></details>
  <button id="saveMatchBtn" style="margin-top:12px">この4人の情報を共有保存</button>
  </div>
  </div>
@@ -71,7 +82,7 @@ button.ghost{background:#e9efff;color:#2155bb}button:disabled{opacity:.5;cursor:
  <div class="row" style="margin-top:8px"><button id="copyInviteBtn" class="ghost">招待URLをコピー</button><button id="revokeInviteBtn" class="ghost">有効な招待URLを停止</button></div>
  <p class="muted">URLを知る人は期限内に閲覧参加できます。招待の停止は参加済みの人には影響しません。</p>
  </div>
-<p class="muted">この段階では本物の局結果を編集しません。更新権限と競合対策だけの検証です。</p>
+<p class="muted">開発テスト版：局結果の編集・取り消し、通常版のローカル履歴との自動統合は未対応です。実際の対局データにはまだ使用しないでください。</p>
 </section>
 <section><h2>動作状況</h2><div id="message" role="status" aria-live="polite">接続設定を入力すると開始できます。</div></section>
 </main>
@@ -211,8 +222,10 @@ async function loadRooms(){
   const box=document.createElement('div');box.className='room';
   const title=document.createElement('div');title.textContent=room.title+' — '+room.match_date;
   const meta=document.createElement('small');meta.textContent=room.owner_id===user.id?'作成者':'閲覧者';
-  const button=document.createElement('button');button.className='ghost';button.textContent='開く';button.onclick=()=>openRoom(room.id);
-  box.append(title,meta,document.createElement('br'),button);$('roomList').append(box);
+  const button=document.createElement('button');button.className='room-choice'+(current?.id===room.id?' selected':'');button.textContent=room.title+' — '+room.match_date;
+  const note=document.createElement('small');note.textContent=room.owner_id===user.id?'自分が作成した半荘':'閲覧専用';button.append(note);
+  button.onclick=()=>current?.id===room.id?closeRoomSelection():openRoom(room.id);
+  box.append(button);$('roomList').append(box);
  }
 }
 async function createRoom(){
@@ -317,8 +330,8 @@ function rankIndices(points){
 }
 function leaderOf(points){return rankIndices(points)[0]}
 function endDecision(before,outcome){
- const points=outcome.points,threshold=MATCH_RULES.threshold;
- if(points.some(x=>x<0))return {ended:true,reason:'飛び終了'};
+ const rules=validMatchRules(before.rules||MATCH_RULES),points=outcome.points,threshold=rules.threshold;
+ if(rules.tobi&&points.some(x=>x<0))return {ended:true,reason:'飛び終了'};
  const lastRound=before.round;
  if(lastRound<7)return {ended:false};
  const top=leaderOf(points),qualifies=points[top]>=threshold;
@@ -334,7 +347,34 @@ function endDecision(before,outcome){
  if(outcome.retain)return {ended:qualifies&&isDealerLeading,reason:'西入後の親のあがりやめ・聴牌やめ'};
  return {ended:qualifies,reason:'西入後の規定点到達'};
 }
-const MATCH_RULES={start:25000,return:30000,uma:[10,5,-5,-10],oka:20,threshold:30000};
+const MATCH_RULES={start:25000,return:30000,uma:[10,5,-5,-10],oka:20,threshold:30000,tobi:true};
+function validMatchRules(x){
+ const r={...MATCH_RULES,...(x||{})};
+ if(!Array.isArray(r.uma)||r.uma.length!==4||[r.start,r.return,r.threshold,r.oka,...r.uma].some(v=>!Number.isSafeInteger(v))||typeof r.tobi!=='boolean')throw Error('半荘ルールの入力を確認してください。');
+ if(r.start<1000||r.start>100000||r.return<1000||r.return>100000||r.threshold<1000||r.threshold>100000||r.uma.some(n=>n<-100||n>100)||r.oka<-100||r.oka>100)throw Error('ルールの数値が範囲外です。');
+ if(r.uma.reduce((sum,n)=>sum+n,0)!==0)throw Error('ウマの合計を0にしてください。');
+ return r;
+}
+function readSharedRules(){
+ const get=k=>Number($('sharedRule'+k)?.value);
+ return validMatchRules({start:get('Start'),return:get('Return'),threshold:get('Threshold'),oka:get('Oka'),
+  uma:[1,2,3,4].map(i=>get('Uma'+i)),tobi:$('sharedRuleTobi')?.checked??true});
+}
+function renderSharedRules(m,editable){
+ const r=validMatchRules(m?.rules||MATCH_RULES);
+ const vals=[['Start','開始点',r.start],['Return','返し点',r.return],['Threshold','終了条件点',r.threshold],['Oka','オカ',r.oka],...r.uma.map((v,i)=>['Uma'+(i+1),(i+1)+'位ウマ',v])];
+ $('sharedRules').innerHTML=vals.map(([key,label,value])=>'<label>'+label+'<input id="sharedRule'+key+'" type="number" value="'+value+'" '+(editable?'':'disabled')+'></label>').join('')+
+  '<label style="display:flex;gap:8px;align-items:center"><input style="width:auto;height:auto" id="sharedRuleTobi" type="checkbox" '+(r.tobi?'checked':'')+' '+(editable?'':'disabled')+'>飛び終了</label>';
+}
+function settlementPreview(m){
+ const r=validMatchRules(m.rules||MATCH_RULES);
+ const order=rankIndices(m.points),points=m.points;
+ return order.map((seat,index)=>({
+  name:m.names[seat],rank:index+1,points:points[seat],
+  score:(points[seat]-r.return)/1000+r.uma[index]+(index===0?r.oka:0)
+ }));
+}
+
 
 function makeHandControls(){
  const m=testMatchFromPayload(lastSharedPayload);
@@ -369,12 +409,12 @@ async function commitSharedHand(){
   if(readError)throw readError;
   const m=testMatchFromPayload(data.payload);
   if(!m)throw Error('先に4人の対局情報を共有保存してください。');
-  if(m.status==='完了')throw Error('完了した半荘は編集できません。');
+  if(m.status==='完了'||m.status==='中断')throw Error('記録を再開してから入力してください。');
   const initial={...m,honba:Number(m.honba)||0,sticks:Number(m.sticks)||0,dealer:Number(m.dealer)||0,round:Number(m.round)||0};
   const result=calcHand(initial,{type,winners,loser,riichi,tenpai,hands});
   const hand={roundIndex:initial.round,label:(['東','南','西','北'][Math.floor(initial.round/4)]||'北')+(initial.round%4+1)+'局 '+initial.honba+'本場',honba:initial.honba,type,result:result.detail,delta:result.delta,riichi,winners,loser,tenpai,hands,input:{type,winners,loser,riichi,tenpai,hands}};
   const updated={...m,points:result.points,dealer:result.dealer,round:result.round,honba:result.honba,sticks:result.sticks,hands:[...(m.hands||[]),hand]};
-  const decision=endDecision({round:initial.round,dealer:initial.dealer},result);
+  const decision=endDecision({round:initial.round,dealer:initial.dealer,rules:initial.rules},result);
   if(decision.ended){updated.status='完了';updated.endReason=decision.reason;updated.finished=new Date().toISOString()}
   if(updated.hands.length>100)throw Error('テストは最大100局までです。');
   const {error}=await client.rpc('mahjong_write_snapshot',{p_room_id:roomId,p_expected_revision:data.revision,p_payload:{...data.payload,sharedMatch:updated}});
@@ -389,6 +429,22 @@ function testMatchFromPayload(payload){
  if(!m||!Array.isArray(m.names)||!Array.isArray(m.points)||m.names.length!==4||m.points.length!==4)return null;
  return m;
 }
+async function setSharedMatchStatus(next){
+ if(!current||!user||current.owner_id!==user.id)return notify('作成者のみ操作できます。');
+ const id=current.id;
+ const {data,error}=await client.from('mahjong_room_snapshots').select('revision,payload').eq('room_id',id).single();
+ if(error)return fail(error);
+ const m=testMatchFromPayload(data.payload);if(!m)return notify('対局情報を登録してください。');
+ if(m.status==='完了')return notify('完了済み半荘は変更できません。');
+ if(next==='完了'&&!confirm('半荘を終了し、記録を確定しますか？終了すると再開できません。'))return;
+ if(next==='中断'&&m.status==='中断')return;
+ if(next==='進行中'&&m.status==='進行中')return;
+ const modified={...m,status:next};
+ if(next==='完了'){modified.finished=new Date().toISOString();modified.endReason='手動終了'}
+ const {error:writeError}=await client.rpc('mahjong_write_snapshot',{p_room_id:id,p_expected_revision:data.revision,p_payload:{...data.payload,sharedMatch:modified}});
+ if(writeError)return fail(writeError);
+ await refresh();notify(next==='中断'?'半荘を中断保存しました。':'半荘を'+(next==='完了'?'終了しました。':'再開しました。'));
+}
 function renderSharedMatch(payload){
  lastSharedPayload=payload;
  const m=testMatchFromPayload(payload);
@@ -399,10 +455,21 @@ function renderSharedMatch(payload){
   (Array.isArray(m.hands)&&m.hands.length?'\n\n直近の局履歴：\n'+m.hands.slice(-5).map(h=>String(h.label||'')+' '+String(h.result||'')+'　'+(Array.isArray(h.delta)?h.delta.map((d,i)=>(Number(d)>=0?'+':'')+Number(d)).join(' / '):'')).join('\n'):''):
   'まだ共有対局データはありません。作成者が保存すると表示されます。';
  const owner=current&&user&&current.owner_id===user.id;
- show('matchEditor',!!owner);show('handInputBox',!!owner&&!!m&&m.status!=='完了');
+ const status=m?.status||'進行中';
+ show('pauseSharedBtn',!!owner&&!!m&&status==='進行中');
+ show('resumeSharedBtn',!!owner&&!!m&&status==='中断');
+ show('finishSharedBtn',!!owner&&!!m&&status!=='完了');
+ show('matchEditor',!!owner&&status!=='完了'&&status!=='中断');
+ show('handInputBox',!!owner&&!!m&&status==='進行中');
+ $('sharedHistory').innerHTML=m?.hands?.length?m.hands.map((h,i)=>'<div class="room"><strong>'+(i+1)+'. '+escapeHtml(h.label||'')+'</strong> '+escapeHtml(h.result||'')+'<br><small>'+m.names.map((n,j)=>escapeHtml(n)+' '+(Number(h.delta?.[j])>=0?'+':'')+Number(h.delta?.[j]||0)).join(' / ')+'</small></div>').join(''):'まだ記録した局はありません。';
+ $('sharedStandings').textContent=m?settlementPreview(m).map(x=>x.rank+'位 '+x.name+'　'+x.points.toLocaleString('ja-JP')+'点　'+(x.score>=0?'+':'')+x.score.toFixed(1)+'pt').join('\n'):'';
+ if(!owner)return;
+ renderSharedRules(m,!m?.hands?.length);
  if(!owner)return;
  makeHandControlsIfNeeded(m);
  const inputs=$('matchFields');
+ if(m?.hands?.length){inputs.replaceChildren();$('saveMatchBtn').disabled=true;return}
+ $('saveMatchBtn').disabled=false;
  // While the editor is being typed, don't overwrite the values on every realtime event.
  if(document.activeElement&&inputs.contains(document.activeElement))return;
  inputs.replaceChildren();
@@ -418,9 +485,10 @@ async function saveSharedMatch(){
  if(!current||!user||current.owner_id!==user.id)return notify('編集権限がありません。');
  const names=[0,1,2,3].map(i=>$('matchName'+i)?.value.trim()||'');
  const points=[0,1,2,3].map(i=>Number($('matchPoints'+i)?.value));
+ let rules;try{rules=readSharedRules()}catch(e){return fail(e)}
  if(names.some(n=>!n||n.length>40)||new Set(names).size!==4)return notify('4人の異なる名前を入力してください。');
  if(points.some(n=>!Number.isSafeInteger(n)||n < -1000000||n>1000000))return notify('持ち点を整数で入力してください。');
- if(points.reduce((a,b)=>a+b,0)!==100000)return notify('テストでは持ち点の合計を100,000点にしてください。');
+ if(points.reduce((a,b)=>a+b,0)!==rules.start*4)return notify('持ち点の合計を開始点×4にしてください。');
  $('saveMatchBtn').disabled=true;
  const roomId=current.id;
  try{
@@ -428,14 +496,15 @@ async function saveSharedMatch(){
   if(readError)throw readError;
   // Preserve unrelated fields such as testCounter; edit only the sharedMatch namespace.
   const prior=testMatchFromPayload(data.payload);
-  if(prior?.hands?.length)throw Error('局履歴がある対局は、この簡易編集欄で変更できません。');
-  const sharedMatch={id:prior?.id||Date.now(),title:current.title,date:prior?.date||new Date().toISOString(),names,points,round:prior?.round||0,dealer:prior?.dealer||0,honba:prior?.honba||0,sticks:prior?.sticks||0,hands:prior?.hands||[],status:prior?.status||'進行中'};
+  if(prior?.hands?.length||prior?.status==='完了'||prior?.status==='中断')throw Error('開始済み・中断中の半荘はこの編集欄で変更できません。');
+  const sharedMatch={id:prior?.id||Date.now(),title:current.title,date:prior?.date||new Date().toISOString(),names,points,rules,round:prior?.round||0,dealer:prior?.dealer||0,honba:prior?.honba||0,sticks:prior?.sticks||0,hands:prior?.hands||[],status:prior?.status||'進行中'};
   const payload={...data.payload,sharedMatch};
   const {error}=await client.rpc('mahjong_write_snapshot',{p_room_id:roomId,p_expected_revision:data.revision,p_payload:payload});
   if(error)throw error;
   notify('4人の対局情報を共有保存しました。');await refresh();
  }catch(e){fail(e)}finally{$('saveMatchBtn').disabled=false}
 }
+function closeRoomSelection(){resetRoom();loadRooms();notify('半荘の記録欄を閉じました。クラウド上の半荘は引き続き保存されています。')}
 async function openRoom(id){
  if(!client||!user)return;
  const {data:room,error}=await client.from('mahjong_rooms').select('id,title,owner_id,status').eq('id',id).single();
@@ -447,6 +516,7 @@ async function openRoom(id){
  show('matchEditor',room.owner_id===user.id);
  show('inviteOwnerBox',room.owner_id===user.id&&!isAnonymousUser());$('generatedInvite').value='';$('inviteQr').replaceChildren();
  await refresh();
+ await loadRooms();
  subscribeToRoom(room.id);
 }
 function subscribeToRoom(roomId){
@@ -512,6 +582,9 @@ $('incrementBtn').onclick=increment;
 $('saveMatchBtn').onclick=saveSharedMatch;
 $('handType').onchange=makeHandControls;
 $('commitSharedHandBtn').onclick=commitSharedHand;
+$('pauseSharedBtn').onclick=()=>setSharedMatchStatus('中断');
+$('resumeSharedBtn').onclick=()=>setSharedMatchStatus('進行中');
+$('finishSharedBtn').onclick=()=>setSharedMatchStatus('完了');
 pendingInvite=inviteInfoFromHash();
 if(pendingInvite?.project&&pendingInvite?.key){$('projectUrl').value=pendingInvite.project;$('publicKey').value=pendingInvite.key;connect()}
 else{try{const saved=JSON.parse(localStorage.getItem(CONFIG_KEY)||'null');if(saved&&saved.url&&saved.key){$('projectUrl').value=saved.url;$('publicKey').value=saved.key;connect()}}catch(e){/* Manual configuration available */}}
