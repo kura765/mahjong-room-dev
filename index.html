@@ -156,7 +156,12 @@ button.danger{background:#fff0f0;color:#aa2935}
  </div>
 <p class="muted">開発テスト版：局結果の編集・取り消し、通常版のローカル履歴との自動統合は未対応です。実際の対局データにはまだ使用しないでください。</p>
 </section>
-<section><h2>動作状況</h2><div id="message" role="status" aria-live="polite">接続設定を入力すると開始できます。</div></section>
+<section><h2>動作状況</h2><div id="message" role="status" aria-live="polite">接続設定を入力すると開始できます。</div>
+<details class="settings-panel" style="margin-top:14px"><summary>開発版の自動動作テスト</summary>
+<p class="muted">サンプル局で点数計算・編集・取り消し・半荘終了・成績集計を検証します。実際の半荘やクラウドの保存データは変更しません。</p>
+<button type="button" class="ghost" id="runDevChecksBtn">動作テストを実行</button>
+<pre id="devChecksResult" class="readonly" style="white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px;margin-top:10px" role="status">未実行</pre>
+</details></section>
 </main>
 <script type="module">
 import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm';
@@ -400,6 +405,44 @@ function sharedStatsOfMatches(matches,players,mode,n){
    avgRank:totals.rank/mine.length,avgPoints:totals.points/mine.length});
  }
  return out.sort((a,b)=>b.score-a.score||a.avgRank-b.avgRank);
+}
+// Non-destructive regression checks. Use the same live rules and replay functions as the app.
+function runDevChecks(){
+ const summary=[],assert=(name,predicate)=>{
+  if(!predicate)throw Error(name+'：結果が期待値と一致しません。');
+  summary.push('✓ '+name);
+ };
+ try{
+  const base={id:1,title:'テスト',date:'2026-11-25',names:['A','B','C','D'],
+   playerIds:['test-id-A','test-id-B','test-id-C','test-id-D'],
+   points:[25000,25000,25000,25000],initialPoints:[25000,25000,25000,25000],
+   hands:[],round:0,dealer:0,honba:0,sticks:0,status:'進行中',rules:{...MATCH_RULES,uma:MATCH_RULES.uma.slice()}};
+  const input={type:'ron',winners:[1],loser:0,riichi:[],tenpai:[],hands:{1:{han:2,fu:30,yakuman:0}}};
+  const one=replaySharedHands(base,[input]);
+  assert('ロンで1局を保存できる',one.hands.length===1&&one.status==='進行中');
+  assert('点数が正しく移動する',one.points.join(',')==='23000,27000,25000,25000');
+  const corrected=replaySharedHands(one,[{...input,winners:[2],hands:{2:{han:2,fu:30,yakuman:0}}}]);
+  assert('局の編集・再計算',corrected.points.join(',')==='23000,25000,27000,25000');
+  const undone=replaySharedHands(one,[]);
+  assert('局の取り消しで元に戻る',undone.hands.length===0&&undone.points.every(v=>v===25000));
+  const draw=()=>({type:'draw',winners:[],riichi:[],tenpai:[],hands:{},loser:null});
+  const full=replaySharedHands(base,Array.from({length:12},draw));
+  assert('東1局から西4局まで完遂',full.status==='完了'&&full.hands.length===12&&full.round===12);
+  const standings=settlementPreview(full);
+  assert('順位精算と総ポイントの整合性',standings.length===4&&Math.abs(standings.reduce((total,p)=>total+p.score,0))<1e-6);
+  const games=[
+   {date:'2026-11-23',id:'room-1',m:full},
+   {date:'2026-11-24',id:'room-2',m:{...full,playerIds:undefined}}
+  ];
+  const players=statsPlayers(games,[]);
+  const results=sharedStatsOfMatches(games,players,'all',30);
+  assert('固有ID別の成績を集計',results.some(p=>p.id==='id:test-id-A'&&p.count===1));
+  assert('名前のみの記録も別集計',results.some(p=>p.id==='name:A'&&p.count===1)&&results.length===8);
+  assert('成績集計のポイント総和',Math.abs(results.reduce((t,p)=>t+p.score,0))<1e-6);
+  const recent=sharedStatsOfMatches(games,players,'global',1);
+  assert('全体の直近N半荘を抽出',recent.every(p=>p.legacy)&&recent.length===4);
+  return {ok:true,checks:summary.length,message:summary.join('\n')+'\nすべて成功（'+summary.length+'項目）'};
+ }catch(e){return {ok:false,checks:summary.length,message:summary.join('\n')+'\n✕ '+(e?.message||String(e))}}
 }
 function statsDateOfRoom(room,m){
  const date=String(room.match_date||m.date||'').slice(0,10);
@@ -986,6 +1029,11 @@ $('signOutBtn').onclick=async()=>{resetRoom();if(client)await client.auth.signOu
 $('createRoomBtn').onclick=createRoom;
 $('registerPlayerBtn').onclick=registerPlayer;
 $('applySharedStatsBtn').onclick=loadSharedStats;
+$('runDevChecksBtn').onclick=()=>{
+ const result=runDevChecks();
+ $('devChecksResult').textContent=result.message;
+ $('devChecksResult').style.borderColor=result.ok?'#5aaf82':'#d84b4b';
+};
 $('reloadRoomsBtn').onclick=loadRooms;
 $('refreshBtn').onclick=refresh;
 $('incrementBtn').onclick=increment;
