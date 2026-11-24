@@ -156,6 +156,14 @@ button.danger{background:#fff0f0;color:#aa2935}
  </div>
 <p class="muted">開発テスト版：局結果の編集・取り消し、通常版のローカル履歴との自動統合は未対応です。実際の対局データにはまだ使用しないでください。</p>
 </section>
+<section><h2>v2.22データ移行の事前検査</h2>
+<p class="muted">現行版の「設定 → データ管理 → バックアップを書き出す」で保存したJSONを選ぶと、対局・プレイヤーID・ルール・重複などを検査します。<strong>この操作ではクラウドや端末の対局データを変更しません。</strong></p>
+<label for="migrationBackupFile">バックアップJSON（この端末内でのみ検査）</label>
+<input type="file" id="migrationBackupFile" accept=".json,application/json">
+<button type="button" id="clearMigrationReportBtn" class="ghost" style="margin-top:10px">検査結果を消す</button>
+<pre id="migrationReport" class="readonly" role="status" style="white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px">バックアップを選択してください。</pre>
+<p class="muted" style="font-size:12px">安全のため、バックアップの個人名や対局内容は検査結果に表示しません。検査に成功してもまだクラウド移行は行いません。</p>
+</section>
 <section><h2>動作状況</h2><div id="message" role="status" aria-live="polite">接続設定を入力すると開始できます。</div>
 <details class="settings-panel" style="margin-top:14px"><summary>開発版の自動動作テスト</summary>
 <p class="muted">サンプル局で点数計算・編集・取り消し・半荘終了・成績集計を検証します。実際の半荘やクラウドの保存データは変更しません。</p>
@@ -443,6 +451,110 @@ function runDevChecks(){
   assert('全体の直近N半荘を抽出',recent.every(p=>p.legacy)&&recent.length===4);
   return {ok:true,checks:summary.length,message:summary.join('\n')+'\nすべて成功（'+summary.length+'項目）'};
  }catch(e){return {ok:false,checks:summary.length,message:summary.join('\n')+'\n✕ '+(e?.message||String(e))}}
+}
+// v3.0 migration preflight is fully local. No Supabase / storage writes.
+function inspectV22Backup(data){
+ const issues=[],warnings=[],counts={};
+ const error=msg=>issues.push(msg),warn=msg=>warnings.push(msg);
+ if(!data||typeof data!=='object'||Array.isArray(data)){
+  return {ok:false,counts:{},issues:['バックアップの最上位がオブジェクトではありません。'],warnings:[]};
+ }
+ const matches=Array.isArray(data.matches)?data.matches:null;
+ const suspended=Array.isArray(data.suspendedMatches)?data.suspendedMatches:null;
+ const players=Array.isArray(data.players)?data.players:null;
+ const registry=Array.isArray(data.playerRegistry)?data.playerRegistry:null;
+ if(!matches)error('matches（対局履歴）が配列ではありません。');
+ if(!players)error('players（登録名一覧）が配列ではありません。');
+ if(!registry)error('playerRegistry（固有ID一覧）がありません。v2.19以降のバックアップを使用してください。');
+ if(!suspended)warn('suspendedMatches がありません。旧形式か、未保存の中断対局の可能性があります。');
+ const active=data.active==null?null:data.active;
+ counts.players=players?.length||0;counts.identities=registry?.length||0;
+ counts.deleted=registry?.filter(p=>p?.deleted===true).length||0;
+ counts.completed=matches?.length||0;counts.suspended=suspended?.length||0;
+ counts.active=active?1:0;
+ counts.hands=0;counts.unknownIds=0;counts.noIds=0;counts.duplicates=0;
+ const ids=new Set(),names=new Set();
+ if(registry)for(const [i,p] of registry.entries()){
+  if(!p||typeof p.id!=='string'||!p.id||typeof p.name!=='string'||typeof p.deleted!=='boolean'){
+   error('プレイヤー登録情報に不正な項目があります（'+(i+1)+'番目）。');continue;
+  }
+  if(ids.has(p.id))error('固有IDが重複しています（登録情報）。');
+  ids.add(p.id);
+  if(!p.deleted){
+   if(names.has(p.name))warn('登録中のプレイヤー名に重複があります。');
+   names.add(p.name);
+  }
+ }
+ if(players&&players.some(n=>typeof n!=='string'))error('登録名一覧に文字列以外が含まれます。');
+ if(players&&registry&&players.length!==registry.filter(p=>p&&!p.deleted).length)
+  warn('登録名一覧と有効な固有IDの件数が一致しません。');
+ const seen=new Set(),validSeat=i=>Number.isInteger(i)&&i>=0&&i<4;
+ const checkMatch=(m,where,i)=>{
+  const label=where+' '+(i+1)+'件目';
+  if(!m||!Array.isArray(m.names)||m.names.length!==4||
+     m.names.some(n=>typeof n!=='string'||!n)||
+     !Array.isArray(m.points)||m.points.length!==4||
+     m.points.some(v=>!Number.isSafeInteger(v))||
+     !Array.isArray(m.hands)){error(label+'：4人の名前・点数・局履歴の形式に問題があります。');return}
+  counts.hands+=m.hands.length;
+  if(m.id===null||m.id===undefined)warn(label+'：対局IDがありません。');
+  else{const key=String(m.id);
+   if(seen.has(key)){counts.duplicates++;warn('同じ対局IDが複数あります。移行前に重複の確認が必要です。')}
+   seen.add(key);
+  }
+  if(!Array.isArray(m.playerIds)||m.playerIds.length!==4){
+   counts.noIds++;warn(label+'：プレイヤーIDがありません。名前だけでは同一人物と確定できません。');
+  }else{
+   if(new Set(m.playerIds).size!==4)error(label+'：対局内でプレイヤーIDが重複しています。');
+   m.playerIds.forEach(id=>{
+    if(typeof id!=='string'||!id)error(label+'：プレイヤーIDの形式が不正です。');
+    else if(!ids.has(id))counts.unknownIds++; // permanent-deleted registry entries may be absent
+   });
+  }
+  if(!m.rules||typeof m.rules!=='object')warn(label+'：ルールが省略されています。既定ルールを使ったと仮定できません。');
+  else try{validMatchRules(m.rules)}catch(_){warn(label+'：ルールが現行クラウド形式で直接扱えません。変換仕様の確認が必要です。')}
+  for(const [j,h] of m.hands.entries()){
+   if(!h||typeof h!=='object'||!Array.isArray(h.delta)||h.delta.length!==4||
+      h.delta.some(v=>!Number.isFinite(v)))error(label+'：'+(j+1)+'局目の点数移動の形式が不正です。');
+   if(h?.winners&&!Array.isArray(h.winners))error(label+'：和了者一覧の形式が不正です。');
+   else if(Array.isArray(h?.winners)&&!h.winners.every(validSeat))error(label+'：和了者の座席番号が不正です。');
+   if(h?.input&&!['ron','tsumo','draw','intermediate'].includes(h.input.type))
+    warn(label+'：過去局の入力データが現行形式に合いません。');
+  }
+ };
+ (matches||[]).forEach((m,i)=>checkMatch(m,'完了履歴',i));
+ (suspended||[]).forEach((m,i)=>checkMatch(m,'中断履歴',i));
+ if(active)checkMatch(active,'進行中',0);
+ if(counts.unknownIds)warn('登録一覧に存在しない固有IDへの参照が'+counts.unknownIds+'席分あります。完全削除済みIDかデータ不整合か確認が必要です。');
+ if(data.ruleFormats&&!Array.isArray(data.ruleFormats))error('ルールフォーマット一覧が不正です。');
+ counts.formats=Array.isArray(data.ruleFormats)?data.ruleFormats.length:0;
+ return {ok:issues.length===0,counts,issues,warnings};
+}
+function formatMigrationReport(result){
+ const c=result.counts||{};
+ return (result.ok?'検査完了：基本形式に重大な問題は見つかりませんでした。':'検査結果：修正が必要な問題があります。')+
+ '\\n\\n対局履歴：'+(c.completed??'―')+'件 / 中断：'+(c.suspended??'―')+'件 / 進行中：'+(c.active??'―')+'件'+
+ '\\n記録局数：'+(c.hands??'―')+'局'+
+ '\\n登録名：'+(c.players??'―')+'件 / 固有ID：'+(c.identities??'―')+'件（削除済み'+(c.deleted??'―')+'件）'+
+ '\\nルールフォーマット：'+(c.formats??'―')+'件'+
+ '\\nID未設定の対局：'+(c.noIds??'―')+'件 / 未登録ID参照：'+(c.unknownIds??'―')+'席 / ID重複の可能性：'+(c.duplicates??'―')+'件'+
+ '\\n\\n問題 '+result.issues.length+'件'+(result.issues.length?'\\n'+result.issues.slice(0,25).map(x=>'・'+x).join('\\n'):'')+
+ '\\n\\n注意 '+result.warnings.length+'件'+(result.warnings.length?'\\n'+result.warnings.slice(0,25).map(x=>'・'+x).join('\\n'):'')+
+ (result.issues.length>25||result.warnings.length>25?'\\n※表示は各25件まで':'')+
+ '\\n\\n※移行・アップロードは未実施。元のバックアップファイルを保管してください。';
+}
+async function checkMigrationBackupFile(){
+ const input=$('migrationBackupFile'),file=input.files?.[0];
+ if(!file)return;
+ const output=$('migrationReport');
+ output.textContent='ローカルで検査しています…';
+ try{
+  if(file.size>25*1024*1024)throw Error('25MBを超えるバックアップはこの画面では検査できません。');
+  const text=await file.text();
+  const result=inspectV22Backup(JSON.parse(text));
+  output.textContent=formatMigrationReport(result);
+ }catch(e){output.textContent='ファイルを検査できません：'+(e?.message||String(e))}
+ finally{input.value=''}
 }
 function statsDateOfRoom(room,m){
  const date=String(room.match_date||m.date||'').slice(0,10);
@@ -1029,6 +1141,8 @@ $('signOutBtn').onclick=async()=>{resetRoom();if(client)await client.auth.signOu
 $('createRoomBtn').onclick=createRoom;
 $('registerPlayerBtn').onclick=registerPlayer;
 $('applySharedStatsBtn').onclick=loadSharedStats;
+$('migrationBackupFile').onchange=checkMigrationBackupFile;
+$('clearMigrationReportBtn').onclick=()=>{$('migrationReport').textContent='バックアップを選択してください。';$('migrationBackupFile').value=''};
 $('runDevChecksBtn').onclick=()=>{
  const result=runDevChecks();
  $('devChecksResult').textContent=result.message;
