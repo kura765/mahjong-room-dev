@@ -67,7 +67,7 @@ begin
      p_source_key !~ '^v22-match:[a-zA-Z0-9_-]{1,100}$' then
     raise exception '移行元IDの形式が正しくありません' using errcode='22023';
   end if;
-  if p_payload is null or jsonb_typeof(p_payload) <> 'object' or
+  if p_payload is null or jsonb_typeof(p_payload) is distinct from 'object' or
      pg_catalog.octet_length(p_payload::text) > 8000000 then
     raise exception '移行データの形式またはサイズが不正です' using errcode='22023';
   end if;
@@ -83,11 +83,14 @@ begin
      or v_match->>'migratedReadOnly' is distinct from 'true'
      or v_source_id is null or p_source_key <> 'v22-match:'||v_source_id
      or v_match->>'id' is distinct from v_source_id
-     or jsonb_typeof(p_payload->'legacyOriginal') <> 'object'
-     or jsonb_typeof(v_names) <> 'array' or jsonb_array_length(v_names) <> 4
-     or jsonb_typeof(v_points) <> 'array' or jsonb_array_length(v_points) <> 4
-     or jsonb_typeof(v_hands) <> 'array' or jsonb_array_length(v_hands) > 2000
-     or v_match->>'status' not in ('完了','中断','進行中','無効') then
+     or jsonb_typeof(p_payload->'legacyOriginal') is distinct from 'object'
+     or jsonb_typeof(v_names) is distinct from 'array'
+     or jsonb_array_length(case when jsonb_typeof(v_names)='array' then v_names else '[]'::jsonb end) <> 4
+     or jsonb_typeof(v_points) is distinct from 'array'
+     or jsonb_array_length(case when jsonb_typeof(v_points)='array' then v_points else '[]'::jsonb end) <> 4
+     or jsonb_typeof(v_hands) is distinct from 'array'
+     or jsonb_array_length(case when jsonb_typeof(v_hands)='array' then v_hands else '[]'::jsonb end) > 2000
+     or coalesce(v_match->>'status','') not in ('完了','中断','進行中','無効') then
     raise exception '移行データと移行キーの整合性が確認できません' using errcode='22023';
   end if;
   if exists(
