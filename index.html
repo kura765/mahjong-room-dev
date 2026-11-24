@@ -97,6 +97,7 @@ button.danger{background:#fff0f0;color:#aa2935}
 <select id="handType" class="hide" aria-label="結果"><option value="ron">ロン</option><option value="tsumo">ツモ</option><option value="draw">流局</option><option value="intermediate">途中流局</option></select>
 <div id="handInputs"></div>
 <button id="commitSharedHandBtn" style="margin-top:12px;width:100%">局を確定して共有保存</button>
+<div class="shared-actions"><button id="cancelHandEditBtn" class="ghost hide">編集をキャンセル</button><button id="undoSharedHandBtn" class="ghost">最後の局を取り消す</button></div>
 </div>
  <div id="matchEditor" class="hide">
  <p class="muted">作成者だけが半荘を編集できます。局を記録し始めた後は、プレイヤー名・初期持ち点・ルールを変更できません。</p>
@@ -133,6 +134,7 @@ $('navAccountBtn').onclick=()=>showAccountPanel(true);
 const CONFIG_KEY='mahjong-room-lab-public-config'; // Only URL + publishable key, never credentials
 let client=null,user=null,current=null,revision=null;
 let realtimeChannel=null,realtimeSequence=0,lastSharedPayload=null,pendingInvite=null;
+let sharedEditIndex=null,sharedEditRoom=null,handWriteBusy=false;
 function show(id,on){$(id).classList.toggle('hide',!on)}
 function notify(msg){$('message').textContent=msg}
 function fail(e){notify(e?.message||String(e))}
@@ -142,7 +144,7 @@ function stopRealtime(){
   realtimeChannel=null;
   $('liveStatus').textContent='自動更新：停止中';
 }
-function resetRoom(){stopRealtime();current=null;revision=null;lastSharedPayload=null;$('handInputs').replaceChildren();show('currentBox',false);show('inviteOwnerBox',false);show('matchEditor',false);show('handInputBox',false)}
+function resetRoom(){stopRealtime();current=null;revision=null;lastSharedPayload=null;sharedEditIndex=null;sharedEditRoom=null;sharedEditingOriginal=null;$('handInputs').replaceChildren();show('currentBox',false);show('inviteOwnerBox',false);show('matchEditor',false);show('handInputBox',false)}
 function resetAuth(){user=null;show('roomBox',false);resetRoom();$('authStatus').textContent='未ログイン'}
 function inviteInfoFromHash(){const h=new URLSearchParams(location.hash.slice(1));return h.has('invite')?{code:h.get('invite'),project:h.get('project'),key:h.get('key')}:null}
 function clearInviteHash(){history.replaceState(null,'',location.pathname+location.search)}
@@ -441,32 +443,128 @@ function makeHandControls(){
 }
 function escapeHtml(v){return String(v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 function checks(name){return [...document.querySelectorAll('input[name="'+name+'"]:checked')].map(el=>Number(el.value))}
-async function commitSharedHand(){
- if(!current||current.owner_id!==user?.id)return notify('編集権限がありません。');
- const roomId=current.id,type=$('handType').value;
- const winners=checks('winnerSeat'),riichi=checks('handRiichi'),tenpai=checks('handTenpai');
+function initialMatchPoints(m){
+ if(Array.isArray(m.initialPoints)&&m.initialPoints.length===4&&m.initialPoints.every(Number.isSafeInteger))return m.initialPoints.slice();
+ // Older test matches may start from custom point totals. Recover exact initial points by reversing deltas.
+ const points=m.points.map(Number);
+ for(const h of m.hands||[]){
+  if(!Array.isArray(h.delta)||h.delta.length!==4)throw Error('古い局記録に点数差分がないため、再計算できません。');
+  for(let i=0;i<4;i++)points[i]-=Number(h.delta[i]);
+ }
+ if(points.some(n=>!Number.isSafeInteger(n)))throw Error('開始点数を復元できません。');
+ return points;
+}
+function storedHandInput(h){
+ const inp=h?.input||h;
+ if(!inp||!['ron','tsumo','draw','intermediate'].includes(inp.type))throw Error('過去の局入力が不正です。');
+ return {type:inp.type,winners:[...(inp.winners||[])],loser:inp.loser??null,
+  riichi:[...(inp.riichi||[])],tenpai:[...(inp.tenpai||[])],hands:JSON.parse(JSON.stringify(inp.hands||{}))};
+}
+function replaySharedHands(m,inputs){
+ const start=initialMatchPoints(m);
+ const state={names:m.names.slice(),rules:validMatchRules(m.rules||MATCH_RULES),
+  points:start.slice(),dealer:0,round:0,honba:0,sticks:0},hands=[];
+ let lastDecision={ended:false};
+ for(let j=0;j<inputs.length;j++){
+  const input=inputs[j];
+  const before={round:state.round,dealer:state.dealer,rules:state.rules};
+  let result;
+  try{result=calcHand(state,input)}catch(e){throw Error((j+1)+'局目：'+e.message)}
+  lastDecision=endDecision(before,result);
+  if(lastDecision.ended&&j<inputs.length-1)throw Error((j+1)+'局目で半荘が終了するため、後続の局を保持できません。');
+  const hand={roundIndex:state.round,label:(['東','南','西','北'][Math.floor(state.round/4)]||'北')+(state.round%4+1)+'局 '+state.honba+'本場',
+   honba:state.honba,type:input.type,result:result.detail,delta:result.delta,
+   riichi:result.riichi,winners:result.winners,loser:result.loser,tenpai:result.tenpai,
+   hands:JSON.parse(JSON.stringify(input.hands||{})),input:JSON.parse(JSON.stringify(input))};
+  hands.push(hand);
+  Object.assign(state,{points:result.points,dealer:result.dealer,round:result.round,honba:result.honba,sticks:result.sticks});
+ }
+ const revised={...m,initialPoints:start,hands,points:state.points,dealer:state.dealer,
+  round:state.round,honba:state.honba,sticks:state.sticks};
+ if(lastDecision.ended){revised.status='完了';revised.endReason=lastDecision.reason;revised.finished=new Date().toISOString()}
+ else if(m.endReason&&m.finished&&m.status==='完了'){revised.status='進行中';delete revised.endReason;delete revised.finished}
+ return revised;
+}
+function getSharedHandInput(){
+ const type=$('handType').value,winners=checks('winnerSeat'),riichi=checks('handRiichi'),tenpai=checks('handTenpai');
  const hands={};
  for(const w of winners)hands[w]={han:Number($('handHan'+w).value),fu:Number($('handFu'+w).value),yakuman:Number($('handYakuman'+w).value)};
- const loser=type==='ron'?Number($('handLoser').value):null;
- $('commitSharedHandBtn').disabled=true;
+ return {type,winners,riichi,tenpai,hands,loser:type==='ron'?Number($('handLoser').value):null};
+}
+async function writeSharedInputs(transform,success){
+ if(!current||current.owner_id!==user?.id||handWriteBusy)return notify('編集できません。');
+ const id=current.id;handWriteBusy=true;
+ $('commitSharedHandBtn').disabled=true;$('undoSharedHandBtn').disabled=true;
  try{
-  const {data,error:readError}=await client.from('mahjong_room_snapshots').select('revision,payload').eq('room_id',roomId).single();
-  if(readError)throw readError;
-  if(current?.id!==roomId)throw Error('別の半荘が選択されました。');
-  const m=testMatchFromPayload(data.payload);
-  if(!m)throw Error('先に4人の対局情報を共有保存してください。');
-  if(m.status==='完了'||m.status==='中断')throw Error('記録を再開してから入力してください。');
-  const initial={...m,honba:Number(m.honba)||0,sticks:Number(m.sticks)||0,dealer:Number(m.dealer)||0,round:Number(m.round)||0};
-  const result=calcHand(initial,{type,winners,loser,riichi,tenpai,hands});
-  const hand={roundIndex:initial.round,label:(['東','南','西','北'][Math.floor(initial.round/4)]||'北')+(initial.round%4+1)+'局 '+initial.honba+'本場',honba:initial.honba,type,result:result.detail,delta:result.delta,riichi,winners,loser,tenpai,hands,input:{type,winners,loser,riichi,tenpai,hands}};
-  const updated={...m,points:result.points,dealer:result.dealer,round:result.round,honba:result.honba,sticks:result.sticks,hands:[...(m.hands||[]),hand]};
-  const decision=endDecision({round:initial.round,dealer:initial.dealer,rules:initial.rules},result);
-  if(decision.ended){updated.status='完了';updated.endReason=decision.reason;updated.finished=new Date().toISOString()}
-  if(updated.hands.length>100)throw Error('テストは最大100局までです。');
-  const {error}=await client.rpc('mahjong_write_snapshot',{p_room_id:roomId,p_expected_revision:data.revision,p_payload:{...data.payload,sharedMatch:updated}});
+  const {data,error}=await client.from('mahjong_room_snapshots').select('revision,payload').eq('room_id',id).single();
   if(error)throw error;
-  notify('局結果を保存しました：'+result.detail);await refresh();
- }catch(e){fail(e)}finally{$('commitSharedHandBtn').disabled=false}
+  if(current?.id!==id)throw Error('別の半荘が選択されています。');
+  const m=testMatchFromPayload(data.payload);if(!m)throw Error('先に4人の情報を登録してください。');
+  if(m.status!=='進行中')throw Error('中断中または終了済みの半荘です。');
+  const inputs=(m.hands||[]).map(storedHandInput);
+  const updated=transform(m,inputs);
+  if(updated.hands.length>100)throw Error('テストでは最大100局までです。');
+  const {error:writeError}=await client.rpc('mahjong_write_snapshot',{
+   p_room_id:id,p_expected_revision:data.revision,p_payload:{...data.payload,sharedMatch:updated}});
+  if(writeError)throw writeError;
+  sharedEditIndex=null;sharedEditRoom=null;
+  $('handInputs').replaceChildren();$('handType').value='ron';
+  document.querySelectorAll('input[name="handTypeChoice"]').forEach(el=>{el.checked=el.value==='ron'});
+  await refresh();notify(success);
+ }catch(e){fail(e)}
+ finally{handWriteBusy=false;$('commitSharedHandBtn').disabled=false;$('undoSharedHandBtn').disabled=false}
+}
+async function commitSharedHand(){
+ const input=getSharedHandInput(),index=sharedEditIndex,room=sharedEditRoom;
+ await writeSharedInputs((m,inputs)=>{
+  if(index!==null){
+   if(room!==current.id||index<0||index>=inputs.length)throw Error('編集対象の局が変わりました。');
+   // Prevent accidentally overwriting if a different device changed the hand since opening.
+   if(JSON.stringify(storedHandInput(m.hands[index]))!==JSON.stringify(sharedEditingOriginal))throw Error('編集中に元の局が変更されました。編集画面を開き直してください。');
+   inputs[index]=input;
+  }else inputs.push(input);
+  return replaySharedHands(m,inputs);
+ },index===null?'局を保存しました。':'局を修正し、後続の局も再計算しました。');
+}
+let sharedEditingOriginal=null;
+function beginSharedHandEdit(index){
+ const m=testMatchFromPayload(lastSharedPayload);
+ if(!current||!m||current.owner_id!==user?.id||m.status!=='進行中')return;
+ if(!Number.isInteger(index)||index<0||index>=m.hands.length)return;
+ const input=storedHandInput(m.hands[index]);
+ sharedEditIndex=index;sharedEditRoom=current.id;sharedEditingOriginal=JSON.parse(JSON.stringify(input));
+ $('handType').value=input.type;
+ document.querySelectorAll('input[name="handTypeChoice"]').forEach(el=>el.checked=el.value===input.type);
+ makeHandControls();
+ document.querySelectorAll('input[name="winnerSeat"]').forEach(el=>el.checked=input.winners.includes(Number(el.value)));
+ document.querySelectorAll('input[name="handRiichi"]').forEach(el=>el.checked=input.riichi.includes(Number(el.value)));
+ document.querySelectorAll('input[name="handTenpai"]').forEach(el=>el.checked=input.tenpai.includes(Number(el.value)));
+ if(input.type==='ron'&&$('handLoser'))$('handLoser').value=String(input.loser);
+ for(const [key,h] of Object.entries(input.hands||{})){
+  if($('handHan'+key))$('handHan'+key).value=h.han;
+  if($('handFu'+key))$('handFu'+key).value=h.fu;
+  if($('handYakuman'+key))$('handYakuman'+key).value=h.yakuman;
+ }
+ $('commitSharedHandBtn').textContent=(index+1)+'局目の修正を保存';
+ show('cancelHandEditBtn',true);
+ $('handInputBox').scrollIntoView({behavior:'smooth',block:'start'});
+ notify((index+1)+'局目を編集中です。保存すると後続の局も再計算します。');
+}
+function cancelSharedHandEdit(){
+ sharedEditIndex=null;sharedEditRoom=null;sharedEditingOriginal=null;
+ $('commitSharedHandBtn').textContent='局を確定して共有保存';
+ show('cancelHandEditBtn',false);
+ $('handInputs').replaceChildren();makeHandControls();
+}
+async function undoSharedHand(){
+ const m=testMatchFromPayload(lastSharedPayload);
+ if(!m?.hands?.length)return notify('取り消せる局がありません。');
+ if(!confirm('最後の1局を取り消しますか？点数・親・本場・供託を再計算して共有保存します。'))return;
+ await writeSharedInputs((serverMatch,inputs)=>{
+  if(!inputs.length)throw Error('取り消せる局がありません。');
+  if(serverMatch.hands.length!==m.hands.length)throw Error('他の端末で局数が変更されました。再表示してください。');
+  inputs.pop();return replaySharedHands(serverMatch,inputs);
+ },'最後の1局を取り消し、点数を再計算しました。');
 }
 
 function seatLabel(i){return ['東家','南家','西家','北家'][i]}
@@ -516,7 +614,9 @@ function renderSharedMatch(payload){
  show('finishSharedBtn',!!owner&&!!m&&status!=='完了');
  show('matchEditor',!!owner&&status!=='完了'&&status!=='中断');
  show('handInputBox',!!owner&&!!m&&status==='進行中');
- $('sharedHistory').innerHTML=m?.hands?.length?m.hands.map((h,i)=>'<div class="room"><strong>'+(i+1)+'. '+escapeHtml(h.label||'')+'</strong> '+escapeHtml(h.result||'')+'<br><small>'+m.names.map((n,j)=>escapeHtml(n)+' '+(Number(h.delta?.[j])>=0?'+':'')+Number(h.delta?.[j]||0)).join(' / ')+'</small></div>').join(''):'まだ記録した局はありません。';
+ show('undoSharedHandBtn',!!owner&&!!m&&status==='進行中'&&!!m.hands?.length);
+ $('sharedHistory').innerHTML=m?.hands?.length?m.hands.map((h,i)=>'<div class="room"><strong>'+(i+1)+'. '+escapeHtml(h.label||'')+'</strong> '+escapeHtml(h.result||'')+'<br><small>'+m.names.map((n,j)=>escapeHtml(n)+' '+(Number(h.delta?.[j])>=0?'+':'')+Number(h.delta?.[j]||0)).join(' / ')+'</small>'+((owner&&status==='進行中')?'<div style="margin-top:6px"><button class="ghost" type="button" data-edit-index="'+i+'">この局を編集</button></div>':'')+'</div>').join(''):'まだ記録した局はありません。';
+ $('sharedHistory').querySelectorAll('[data-edit-index]').forEach(button=>{button.onclick=()=>beginSharedHandEdit(Number(button.dataset.editIndex))});
  $('sharedStandings').textContent=m?settlementPreview(m).map(x=>x.rank+'位 '+x.name+'　'+x.points.toLocaleString('ja-JP')+'点　'+(x.score>=0?'+':'')+x.score.toFixed(1)+'pt').join('\n'):'';
  if(!owner)return;
  renderSharedRules(m,!m?.hands?.length);
@@ -552,7 +652,7 @@ async function saveSharedMatch(){
   // Preserve unrelated fields such as testCounter; edit only the sharedMatch namespace.
   const prior=testMatchFromPayload(data.payload);
   if(prior?.hands?.length||prior?.status==='完了'||prior?.status==='中断')throw Error('開始済み・中断中の半荘はこの編集欄で変更できません。');
-  const sharedMatch={id:prior?.id||Date.now(),title:current.title,date:prior?.date||new Date().toISOString(),names,points,rules,round:prior?.round||0,dealer:prior?.dealer||0,honba:prior?.honba||0,sticks:prior?.sticks||0,hands:prior?.hands||[],status:prior?.status||'進行中'};
+  const sharedMatch={id:prior?.id||Date.now(),title:current.title,date:prior?.date||new Date().toISOString(),names,points,initialPoints:prior?.initialPoints||points.slice(),rules,round:prior?.round||0,dealer:prior?.dealer||0,honba:prior?.honba||0,sticks:prior?.sticks||0,hands:prior?.hands||[],status:prior?.status||'進行中'};
   const payload={...data.payload,sharedMatch};
   const {error}=await client.rpc('mahjong_write_snapshot',{p_room_id:roomId,p_expected_revision:data.revision,p_payload:payload});
   if(error)throw error;
@@ -638,6 +738,8 @@ $('saveMatchBtn').onclick=saveSharedMatch;
 $('handType').onchange=makeHandControls;
 document.querySelectorAll('input[name="handTypeChoice"]').forEach(el=>el.onchange=()=>{if(el.checked){$('handType').value=el.value;makeHandControls()}});
 $('commitSharedHandBtn').onclick=commitSharedHand;
+$('cancelHandEditBtn').onclick=cancelSharedHandEdit;
+$('undoSharedHandBtn').onclick=undoSharedHand;
 $('pauseSharedBtn').onclick=()=>setSharedMatchStatus('中断');
 $('resumeSharedBtn').onclick=()=>setSharedMatchStatus('進行中');
 $('finishSharedBtn').onclick=()=>setSharedMatchStatus('完了');
