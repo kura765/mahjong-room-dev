@@ -483,6 +483,8 @@ function runDevChecks(){
    match:{...dry.candidates[0].match,points:[1,2,3,4]}})}
   catch(e){rejectsChangedSource=true}
   assert('移行時の原記録改変を拒否',rejectsChangedSource);
+  assert('移行済み記録を読み取り専用と判別',isMigratedReadOnly(packet));
+  assert('通常の対局は編集可能',!isMigratedReadOnly({sharedMatch:base}));
   return {ok:true,checks:summary.length,message:summary.join('\n')+'\nすべて成功（'+summary.length+'項目）'};
  }catch(e){return {ok:false,checks:summary.length,message:summary.join('\n')+'\n✕ '+(e?.message||String(e))}}
 }
@@ -1138,6 +1140,7 @@ async function writeSharedInputs(transform,success){
   if(error)throw error;
   if(current?.id!==id)throw Error('別の半荘が選択されています。');
   const m=testMatchFromPayload(data.payload);if(!m)throw Error('先に4人の情報を登録してください。');
+  if(isMigratedReadOnly(data.payload))throw Error('移行済みの過去の局履歴は読み取り専用です。');
   if(m.status!=='進行中')throw Error('中断中または終了済みの半荘です。');
   const inputs=(m.hands||[]).map(storedHandInput);
   const updated=transform(m,inputs);
@@ -1168,7 +1171,7 @@ async function commitSharedHand(){
 let sharedEditingOriginal=null;
 function beginSharedHandEdit(index){
  const m=testMatchFromPayload(lastSharedPayload);
- if(!current||!m||current.owner_id!==user?.id||m.status!=='進行中')return;
+ if(!current||!m||current.owner_id!==user?.id||m.status!=='進行中'||isMigratedReadOnly(lastSharedPayload))return;
  if(!Number.isInteger(index)||index<0||index>=m.hands.length)return;
  const input=storedHandInput(m.hands[index]);
  sharedEditIndex=index;sharedEditRoom=current.id;sharedEditingOriginal=JSON.parse(JSON.stringify(input));
@@ -1207,6 +1210,11 @@ async function undoSharedHand(){
 }
 
 function seatLabel(i){return ['東家','南家','西家','北家'][i]}
+function isMigratedReadOnly(payload){
+ return payload?.migrationFormat==='v22-readonly' &&
+   typeof payload?.migrationKey==='string' &&
+   payload.sharedMatch?.migratedReadOnly===true;
+}
 function testMatchFromPayload(payload){
  const m=payload?.sharedMatch;
  if(!m||!Array.isArray(m.names)||!Array.isArray(m.points)||m.names.length!==4||m.points.length!==4)return null;
@@ -1219,6 +1227,7 @@ async function setSharedMatchStatus(next){
  if(error)return fail(error);
  if(current?.id!==id)return;
  const m=testMatchFromPayload(data.payload);if(!m)return notify('対局情報を登録してください。');
+ if(isMigratedReadOnly(data.payload))return notify('移行済みの半荘は読み取り専用です。');
  if(m.status==='完了')return notify('完了済み半荘は変更できません。');
  if(next==='完了'&&!confirm('半荘を終了し、記録を確定しますか？終了すると再開できません。'))return;
  if(next==='中断'&&m.status==='中断')return;
@@ -1239,6 +1248,8 @@ function renderSharedMatch(payload){
   (Array.isArray(m.hands)&&m.hands.length?'\n\n直近の局履歴：\n'+m.hands.slice(-5).map(h=>String(h.label||'')+' '+String(h.result||'')+'　'+(Array.isArray(h.delta)?h.delta.map((d,i)=>(Number(d)>=0?'+':'')+Number(d)).join(' / '):'')).join('\n'):''):
   'まだ共有対局データはありません。作成者が保存すると表示されます。';
  const owner=current&&user&&current.owner_id===user.id;
+ const archived=isMigratedReadOnly(payload);
+ const canEdit=!!owner&&!archived;
  const status=m?.status||'進行中';
  show('recordHead',!!m);show('scoreboard',!!m);
  if(m){
@@ -1248,16 +1259,16 @@ function renderSharedMatch(payload){
   $('scoreboard').innerHTML=m.names.map((name,i)=>'<div class="scoretile"><div class="seat">'+seatLabel(i)+(i===m.dealer?' ・ 親':'')+' / '+(ranks.indexOf(i)+1)+'位</div><div class="name">'+escapeHtml(name)+'</div><div class="points">'+Number(m.points[i]).toLocaleString('ja-JP')+'<small>点</small></div></div>').join('');
  }else{$('scoreboard').replaceChildren()}
 
- show('pauseSharedBtn',!!owner&&!!m&&status==='進行中');
- show('resumeSharedBtn',!!owner&&!!m&&status==='中断');
- show('finishSharedBtn',!!owner&&!!m&&status!=='完了');
- show('matchEditor',!!owner&&status!=='完了'&&status!=='中断');
- show('handInputBox',!!owner&&!!m&&status==='進行中');
- show('undoSharedHandBtn',!!owner&&!!m&&status==='進行中'&&!!m.hands?.length);
- $('sharedHistory').innerHTML=m?.hands?.length?m.hands.map((h,i)=>'<div class="room"><strong>'+(i+1)+'. '+escapeHtml(h.label||'')+'</strong> '+escapeHtml(h.result||'')+'<br><small>'+m.names.map((n,j)=>escapeHtml(n)+' '+(Number(h.delta?.[j])>=0?'+':'')+Number(h.delta?.[j]||0)).join(' / ')+'</small>'+((owner&&status==='進行中')?'<div style="margin-top:6px"><button class="ghost" type="button" data-edit-index="'+i+'">この局を編集</button></div>':'')+'</div>').join(''):'まだ記録した局はありません。';
+ show('pauseSharedBtn',canEdit&&!!m&&status==='進行中');
+ show('resumeSharedBtn',canEdit&&!!m&&status==='中断');
+ show('finishSharedBtn',canEdit&&!!m&&status!=='完了');
+ show('matchEditor',canEdit&&status!=='完了'&&status!=='中断');
+ show('handInputBox',canEdit&&!!m&&status==='進行中');
+ show('undoSharedHandBtn',canEdit&&!!m&&status==='進行中'&&!!m.hands?.length);
+ $('sharedHistory').innerHTML=m?.hands?.length?m.hands.map((h,i)=>'<div class="room"><strong>'+(i+1)+'. '+escapeHtml(h.label||'')+'</strong> '+escapeHtml(h.result||'')+'<br><small>'+m.names.map((n,j)=>escapeHtml(n)+' '+(Number(h.delta?.[j])>=0?'+':'')+Number(h.delta?.[j]||0)).join(' / ')+'</small>'+((canEdit&&status==='進行中')?'<div style="margin-top:6px"><button class="ghost" type="button" data-edit-index="'+i+'">この局を編集</button></div>':'')+'</div>').join(''):'まだ記録した局はありません。';
  $('sharedHistory').querySelectorAll('[data-edit-index]').forEach(button=>{button.onclick=()=>beginSharedHandEdit(Number(button.dataset.editIndex))});
  $('sharedStandings').textContent=m?settlementPreview(m).map(x=>x.rank+'位 '+x.name+'　'+x.points.toLocaleString('ja-JP')+'点　'+(x.score>=0?'+':'')+x.score.toFixed(1)+'pt').join('\n'):'';
- if(!owner)return;
+ if(!owner||archived)return;
  renderSharedRules(m,!m?.hands?.length);
  makeHandControlsIfNeeded(m);
  const inputs=$('matchFields');
@@ -1316,6 +1327,7 @@ async function saveSharedMatch(){
   if(current?.id!==roomId)throw Error('別の半荘が選択されました。');
   // Preserve unrelated fields such as testCounter; edit only the sharedMatch namespace.
   const prior=testMatchFromPayload(data.payload);
+  if(isMigratedReadOnly(data.payload))throw Error('移行済みの半荘は読み取り専用です。');
   if(prior?.hands?.length||prior?.status==='完了'||prior?.status==='中断')throw Error('開始済み・中断中の半荘はこの編集欄で変更できません。');
   const sharedMatch={id:prior?.id||Date.now(),title:current.title,date:prior?.date||new Date().toISOString(),names,...(resolvedIds?{playerIds:resolvedIds}:{}),points,initialPoints:prior?.initialPoints||points.slice(),rules,round:prior?.round||0,dealer:prior?.dealer||0,honba:prior?.honba||0,sticks:prior?.sticks||0,hands:prior?.hands||[],status:prior?.status||'進行中'};
   const payload={...data.payload,sharedMatch};
