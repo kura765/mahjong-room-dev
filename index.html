@@ -25,6 +25,17 @@ button.ghost{background:#e9efff;color:#2155bb}button:disabled{opacity:.5;cursor:
 .shared-actions{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0}
 .shared-actions button{flex:1 1 120px}
 button.danger{background:#fff0f0;color:#aa2935}
+.stats-table-wrap{overflow-x:auto;max-width:100%;-webkit-overflow-scrolling:touch}
+.stats-table{width:100%;border-collapse:collapse;font-size:13px;white-space:nowrap}
+.stats-table th,.stats-table td{padding:9px 8px;text-align:right;border-bottom:1px solid #e2e6ee}
+.stats-table th:first-child,.stats-table td:first-child{text-align:left}
+.stats-table th{color:#667085;font-weight:650}
+.stats-note{font-size:12px;color:#667085;margin-top:8px}
+.stats-controls{display:flex;gap:9px;align-items:end;flex-wrap:wrap}
+.stats-controls label{flex:1 1 125px;margin:0}
+.stats-controls select{height:44px;width:100%;min-width:0}
+#statsDetail{white-space:pre-wrap;background:#f5f7fc;padding:10px;border-radius:10px;margin-top:12px;line-height:1.9}
+.stats-table button{min-height:34px;font-size:13px;background:#e9efff;color:#2155bb;padding:6px 9px}
 .player-manager-row{display:flex;align-items:center;justify-content:space-between;gap:8px;border-bottom:1px solid #e5e7eb;padding:9px 0}
 .player-manager-row:last-child{border:0}.player-manager-row button{min-height:38px;padding:6px 12px}
 .player-manager-row small{display:block;color:#667085;font-size:11px}
@@ -76,6 +87,17 @@ button.danger{background:#fff0f0;color:#aa2935}
 <label for="roomTitle">新しい半荘の名前</label><input id="roomTitle" value="新しい半荘">
 <div class="row" style="margin-top:12px"><button id="createRoomBtn">新しい半荘を始める</button><button class="ghost" id="reloadRoomsBtn">一覧を更新</button></div>
 <div id="roomList"></div>
+<details class="settings-panel" id="sharedStatsPanel" style="margin-top:16px;border-top:1px solid #e2e6ee;padding-top:12px"><summary>共有半荘の成績</summary>
+<p class="stats-note">自分が作成した完了済み半荘を集計します。固有IDで区別し、削除済みプレイヤーは非表示にします。</p>
+<div class="stats-controls">
+<label>期間<select id="sharedStatsPeriod"><option value="all">全期間</option><option value="30days">直近30日</option><option value="year">今年</option></select></label>
+<label>集計範囲<select id="sharedStatsLimitMode"><option value="all">期間内すべて</option><option value="global">全体の直近N半荘</option><option value="individual">各プレイヤー直近N半荘</option></select></label>
+<label>直近N（半荘）<input id="sharedStatsCount" type="number" min="1" max="10000" value="30" inputmode="numeric"></label>
+<button id="applySharedStatsBtn" type="button">集計する</button>
+</div>
+<p id="sharedStatsStatus" class="stats-note">「集計する」を押すとクラウド上の結果を取得します。</p>
+<div id="sharedStatsTable" class="stats-table-wrap"></div><div id="statsDetail" class="hide"></div>
+</details>
 <details id="playerManagerPanel" class="settings-panel" style="margin-top:16px;border-top:1px solid #e2e6ee;padding-top:12px"><summary>プレイヤー管理（削除・復活）</summary>
 <p id="playerManagerNotice">登録時に固有IDを発行します。削除しても過去の成績は保持され、復活すると元のIDのまま利用できます。</p>
 <div class="row" style="margin:12px 0"><input id="registerPlayerName" maxlength="40" placeholder="新しいプレイヤー名"><button id="registerPlayerBtn" type="button">登録</button></div>
@@ -147,6 +169,7 @@ let client=null,user=null,current=null,revision=null;
 let realtimeChannel=null,realtimeSequence=0,lastSharedPayload=null,pendingInvite=null;
 let sharedEditIndex=null,sharedEditRoom=null,handWriteBusy=false;
 let playerRegistry=[],playerRegistryLoaded=false;
+let sharedStatsRows=[],sharedStatsSelectedId=null,sharedStatsBusy=false;
 function show(id,on){$(id).classList.toggle('hide',!on)}
 function notify(msg){$('message').textContent=msg}
 function fail(e){notify(e?.message||String(e))}
@@ -317,6 +340,114 @@ async function setPlayerArchived(id,archived){
   notify(archived?'削除済みへ移動しました。対局履歴は残ります。':'以前と同じIDで復活しました。');
  }catch(e){fail(e)}
 }
+// v3.0 development: owner-only stats. Never infer player identity from a name.
+function sharedStatsOfMatches(matches,players,mode,n){
+ const sorted=matches.slice().sort((a,b)=>a.date.localeCompare(b.date)||a.id.localeCompare(b.id));
+ const list=mode==='global'?sorted.slice(-n):sorted;
+ const out=[];
+ for(const p of players){
+  let mine=list.filter(g=>g.m.playerIds.includes(p.id));
+  if(mode==='individual')mine=mine.slice(-n);
+  if(!mine.length)continue;
+  const totals={score:0,raw:0,rank:0,wins:0,dealin:0,riichi:0,tenpai:0,hands:0,points:0,ranks:[0,0,0,0]};
+  for(const game of mine){
+   const m=game.m,seat=m.playerIds.indexOf(p.id);
+   const settle=settlementPreview(m);
+   const entry=settle.find(e=>e.seat===seat);
+   if(!entry)throw Error('精算結果のプレイヤーIDが不正です。');
+   totals.score+=entry.score;totals.raw+=Number(m.points[seat])-validMatchRules(m.rules||MATCH_RULES).start;
+   totals.points+=entry.points;totals.rank+=entry.rank;totals.ranks[entry.rank-1]++;
+   for(const h of m.hands||[]){
+    totals.hands++;
+    const riichi=h.riichi||[],winners=h.winners||[],tenpai=h.tenpai||[];
+    if(winners.includes(seat))totals.wins++;
+    if(h.type==='ron'&&h.loser===seat)totals.dealin++;
+    if(riichi.includes(seat))totals.riichi++;
+    if(new Set([...tenpai,...riichi,...winners]).has(seat))totals.tenpai++;
+   }
+  }
+  out.push({id:p.id,name:p.display_name,count:mine.length,...totals,
+   avgRank:totals.rank/mine.length,avgPoints:totals.points/mine.length});
+ }
+ return out.sort((a,b)=>b.score-a.score||a.avgRank-b.avgRank);
+}
+function statsDateOfRoom(room,m){
+ const date=String(room.match_date||m.date||'').slice(0,10);
+ return /^\d{4}-\d{2}-\d{2}$/.test(date)?date:'';
+}
+function renderSharedStatsRows(rows,meta){
+ sharedStatsRows=rows;
+ $('sharedStatsStatus').textContent=meta;
+ const fmt=v=>(v>0?'+':'')+v.toLocaleString('ja-JP',{minimumFractionDigits:1,maximumFractionDigits:1});
+ $('sharedStatsTable').innerHTML=rows.length?
+  '<table class="stats-table"><thead><tr><th>プレイヤー</th><th>半荘</th><th>合計pt</th><th>平均順位</th><th>素点収支</th></tr></thead><tbody>'+
+  rows.map(r=>'<tr><td><button type="button" data-stats-id="'+escapeHtml(r.id)+'">'+escapeHtml(r.name)+'</button></td><td>'+r.count+'</td><td>'+fmt(r.score)+'</td><td>'+r.avgRank.toFixed(2)+'</td><td>'+fmt(r.raw)+'</td></tr>').join('')+
+  '</tbody></table>':'<p class="muted">集計対象となる完了済み半荘はありません。</p>';
+ $('sharedStatsTable').querySelectorAll('[data-stats-id]').forEach(btn=>{
+  btn.onclick=()=>{sharedStatsSelectedId=sharedStatsSelectedId===btn.dataset.statsId?null:btn.dataset.statsId;renderSharedStatsDetail()};
+ });
+ if(!rows.some(r=>r.id===sharedStatsSelectedId))sharedStatsSelectedId=null;
+ renderSharedStatsDetail();
+}
+function renderSharedStatsDetail(){
+ const r=sharedStatsRows.find(row=>row.id===sharedStatsSelectedId);
+ show('statsDetail',!!r);if(!r)return;
+ const ratio=(v,d)=>d?(100*v/d).toFixed(1)+'%':'―';
+ $('statsDetail').textContent=r.name+'の成績\n半荘数 '+r.count+' / 平均順位 '+r.avgRank.toFixed(2)+
+  '\n平均持ち点 '+Math.round(r.avgPoints).toLocaleString('ja-JP')+'点'+
+  '\n順位回数：1位 '+r.ranks[0]+' / 2位 '+r.ranks[1]+' / 3位 '+r.ranks[2]+' / 4位 '+r.ranks[3]+
+  '\n記録局数 '+r.hands+' / 和了 '+r.wins+'（'+ratio(r.wins,r.hands)+'）'+
+  '\n放銃 '+r.dealin+'（'+ratio(r.dealin,r.hands)+'） / 立直 '+r.riichi+'（'+ratio(r.riichi,r.hands)+'）'+
+  '\n聴牌 '+r.tenpai+'（'+ratio(r.tenpai,r.hands)+'）';
+}
+async function loadSharedStats(){
+ if(sharedStatsBusy||!client||!user||isAnonymousUser())return;
+ if(!playerRegistryLoaded)return notify('プレイヤー管理用SQLを適用し、プレイヤー一覧を読み込んでください。');
+ const n=Number($('sharedStatsCount').value),mode=$('sharedStatsLimitMode').value;
+ if(!Number.isSafeInteger(n)||n<1||n>10000)return notify('直近Nは1～10000の整数を指定してください。');
+ sharedStatsBusy=true;$('applySharedStatsBtn').disabled=true;
+ $('sharedStatsStatus').textContent='完了済み半荘を読み込み中…';
+ try{
+  // Paginate: Supabase/PostgREST normally truncates unpaginated queries to 1000 rows.
+  const rooms=[];
+  for(let offset=0;offset<10000;offset+=200){
+   const {data,error}=await client.from('mahjong_rooms').select('id,match_date,owner_id').eq('owner_id',user.id).order('created_at',{ascending:true}).range(offset,offset+199);
+   if(error)throw error;
+   rooms.push(...(data||[]));
+   if(!data||data.length<200)break;
+   if(offset+200>=10000)throw Error('半荘数が取得上限に達しました。件数を絞ってください。');
+  }
+  const period=$('sharedStatsPeriod').value;
+  const now=new Date(),day=now.getFullYear()+'-'+String(now.getMonth()+1).padStart(2,'0')+'-'+String(now.getDate()).padStart(2,'0');
+  const d30=new Date(now.getFullYear(),now.getMonth(),now.getDate()-29);
+  const cutoff=period==='30days'?d30.getFullYear()+'-'+String(d30.getMonth()+1).padStart(2,'0')+'-'+String(d30.getDate()).padStart(2,'0'):
+   period==='year'?now.getFullYear()+'-01-01':'';
+  const chosen=rooms.filter(r=>!cutoff||String(r.match_date||'').slice(0,10)>=cutoff);
+  const matches=[];let legacy=0,incomplete=0;
+  for(let i=0;i<chosen.length;i+=40){
+   const batch=chosen.slice(i,i+40);
+   if(!batch.length)continue;
+   const {data,error}=await client.from('mahjong_room_snapshots').select('room_id,payload').in('room_id',batch.map(r=>r.id));
+   if(error)throw error;
+   const byRoom=new Map(batch.map(r=>[String(r.id),r]));
+   for(const snap of data||[]){
+    const m=testMatchFromPayload(snap.payload);
+    if(!m||m.status!=='完了'){incomplete++;continue}
+    if(!Array.isArray(m.playerIds)||m.playerIds.length!==4||new Set(m.playerIds).size!==4){legacy++;continue}
+    const room=byRoom.get(String(snap.room_id));
+    if(!room)continue;
+    const date=statsDateOfRoom(room,m);
+    if(!date||date>day||cutoff&&date<cutoff)continue;
+    matches.push({date,id:String(room.id),m});
+   }
+  }
+  const rows=sharedStatsOfMatches(matches,activePlayers(),mode,n);
+  renderSharedStatsRows(rows,'対象：'+matches.length+'半荘（作成者の完了済み記録）'+
+   (legacy?' / ID未設定の旧半荘 '+legacy+'件は未集計':'')+
+   (incomplete?' / 未完了など '+incomplete+'件は未集計':''));
+ }catch(e){$('sharedStatsStatus').textContent='成績を取得できませんでした。';fail(e)}
+ finally{sharedStatsBusy=false;$('applySharedStatsBtn').disabled=false}
+}
 async function loadRooms(){
  if(!user)return;
  const {data,error}=await client.from('mahjong_rooms').select('id,title,match_date,status,owner_id').order('created_at',{ascending:false}).limit(30);
@@ -480,7 +611,7 @@ function settlementPreview(m){
  points[rankOrder[0]]+=Number(m.sticks||0)*1000;
  const order=rankIndices(points);
  return order.map((seat,index)=>({
-  name:m.names[seat],rank:index+1,points:points[seat],
+  name:m.names[seat],seat,rank:index+1,points:points[seat],
   score:(points[seat]-r.return)/1000+r.uma[index]+(index===0?r.oka:0)
  }));
 }
@@ -815,6 +946,7 @@ $('revokeInviteBtn').onclick=revokeInvites;
 $('signOutBtn').onclick=async()=>{resetRoom();if(client)await client.auth.signOut();await updateAuth()};
 $('createRoomBtn').onclick=createRoom;
 $('registerPlayerBtn').onclick=registerPlayer;
+$('applySharedStatsBtn').onclick=loadSharedStats;
 $('reloadRoomsBtn').onclick=loadRooms;
 $('refreshBtn').onclick=refresh;
 $('incrementBtn').onclick=increment;
