@@ -91,7 +91,7 @@ button.danger{background:#fff0f0;color:#aa2935}
 <div class="row" style="margin-top:12px"><button id="createRoomBtn">新しい半荘を始める</button><button class="ghost" id="reloadRoomsBtn">一覧を更新</button></div>
 <div id="roomList"></div>
 <details class="settings-panel" id="sharedStatsPanel" style="margin-top:16px;border-top:1px solid #e2e6ee;padding-top:12px"><summary>共有半荘の成績</summary>
-<p class="stats-note">自分が作成した完了済み半荘を集計します。固有IDで区別し、削除済みプレイヤーは非表示にします。</p>
+<p class="stats-note">自分が作成した完了済み半荘を集計します。固有ID付きの記録はID別に、IDのない対局は「名前のみ」として別集計します。同名の別IDと合算しません。</p>
 <div class="stats-controls">
 <label>期間<select id="sharedStatsPeriod"><option value="all">全期間</option><option value="30days">直近30日</option><option value="year">今年</option></select></label>
 <label>集計範囲<select id="sharedStatsLimitMode"><option value="all">期間内すべて</option><option value="global">全体の直近N半荘</option><option value="individual">各プレイヤー直近N半荘</option></select></label>
@@ -346,21 +346,45 @@ async function setPlayerArchived(id,archived){
   notify(archived?'削除済みへ移動しました。対局履歴は残ります。':'以前と同じIDで復活しました。');
  }catch(e){fail(e)}
 }
-// v3.0 development: owner-only stats. Never infer player identity from a name.
+// v3.0 development: owner-only statistics.
+// Names-only records are counted in a separate, clearly marked legacy bucket;
+// never attach them to a registered player merely because the name matches.
+function validStatsIds(m){
+ return Array.isArray(m.playerIds)&&m.playerIds.length===4&&
+  m.playerIds.every(id=>typeof id==='string'&&id.length>0)&&new Set(m.playerIds).size===4;
+}
+function statsIdentity(m,seat){
+ return validStatsIds(m)?'id:'+m.playerIds[seat]:'name:'+m.names[seat];
+}
+function statsPlayers(matches,registry){
+ const result=new Map();
+ const known=new Map(registry.map(p=>[p.id,p]));
+ for(const game of matches){
+  for(let seat=0;seat<4;seat++){
+   const m=game.m,key=statsIdentity(m,seat),identified=validStatsIds(m);
+   const stored=identified?known.get(m.playerIds[seat]):null;
+   // A deleted registered identity is intentionally hidden; names-only records remain visible.
+   if(stored?.deleted_at)continue;
+   if(!result.has(key))result.set(key,{id:key,name:stored?.display_name||m.names[seat],legacy:!identified});
+  }
+ }
+ return [...result.values()];
+}
 function sharedStatsOfMatches(matches,players,mode,n){
  const sorted=matches.slice().sort((a,b)=>a.date.localeCompare(b.date)||a.id.localeCompare(b.id));
  const list=mode==='global'?sorted.slice(-n):sorted;
  const out=[];
  for(const p of players){
-  let mine=list.filter(g=>g.m.playerIds.includes(p.id));
+  let mine=list.filter(g=>g.m.names.some((_,seat)=>statsIdentity(g.m,seat)===p.id));
   if(mode==='individual')mine=mine.slice(-n);
   if(!mine.length)continue;
   const totals={score:0,raw:0,rank:0,wins:0,dealin:0,riichi:0,tenpai:0,hands:0,points:0,ranks:[0,0,0,0]};
   for(const game of mine){
-   const m=game.m,seat=m.playerIds.indexOf(p.id);
+   const m=game.m,seat=m.names.findIndex((_,i)=>statsIdentity(m,i)===p.id);
+   if(seat<0)throw Error('集計対象のプレイヤーが見つかりません。');
    const settle=settlementPreview(m);
    const entry=settle.find(e=>e.seat===seat);
-   if(!entry)throw Error('精算結果のプレイヤーIDが不正です。');
+   if(!entry)throw Error('精算結果のプレイヤー情報が不正です。');
    totals.score+=entry.score;totals.raw+=Number(m.points[seat])-validMatchRules(m.rules||MATCH_RULES).start;
    totals.points+=entry.points;totals.rank+=entry.rank;totals.ranks[entry.rank-1]++;
    for(const h of m.hands||[]){
@@ -372,7 +396,7 @@ function sharedStatsOfMatches(matches,players,mode,n){
     if(new Set([...tenpai,...riichi,...winners]).has(seat))totals.tenpai++;
    }
   }
-  out.push({id:p.id,name:p.display_name,count:mine.length,...totals,
+  out.push({...p,count:mine.length,...totals,
    avgRank:totals.rank/mine.length,avgPoints:totals.points/mine.length});
  }
  return out.sort((a,b)=>b.score-a.score||a.avgRank-b.avgRank);
@@ -387,7 +411,7 @@ function renderSharedStatsRows(rows,meta){
  const fmt=v=>(v>0?'+':'')+v.toLocaleString('ja-JP',{minimumFractionDigits:1,maximumFractionDigits:1});
  $('sharedStatsTable').innerHTML=rows.length?
   '<table class="stats-table"><thead><tr><th>プレイヤー</th><th>半荘</th><th>合計pt</th><th>平均順位</th><th>素点収支</th></tr></thead><tbody>'+
-  rows.map(r=>'<tr><td><button type="button" data-stats-id="'+escapeHtml(r.id)+'">'+escapeHtml(r.name)+'</button></td><td>'+r.count+'</td><td>'+fmt(r.score)+'</td><td>'+r.avgRank.toFixed(2)+'</td><td>'+fmt(r.raw)+'</td></tr>').join('')+
+  rows.map(r=>'<tr><td><button type="button" data-stats-id="'+escapeHtml(r.id)+'">'+escapeHtml(r.name)+(r.legacy?'（名前のみ）':'')+'</button></td><td>'+r.count+'</td><td>'+fmt(r.score)+'</td><td>'+r.avgRank.toFixed(2)+'</td><td>'+fmt(r.raw)+'</td></tr>').join('')+
   '</tbody></table>':'<p class="muted">集計対象となる完了済み半荘はありません。</p>';
  $('sharedStatsTable').querySelectorAll('[data-stats-id]').forEach(btn=>{
   btn.onclick=()=>{sharedStatsSelectedId=sharedStatsSelectedId===btn.dataset.statsId?null:btn.dataset.statsId;renderSharedStatsDetail()};
@@ -399,7 +423,7 @@ function renderSharedStatsDetail(){
  const r=sharedStatsRows.find(row=>row.id===sharedStatsSelectedId);
  show('statsDetail',!!r);if(!r)return;
  const ratio=(v,d)=>d?(100*v/d).toFixed(1)+'%':'―';
- $('statsDetail').textContent=r.name+'の成績\n半荘数 '+r.count+' / 平均順位 '+r.avgRank.toFixed(2)+
+ $('statsDetail').textContent=r.name+(r.legacy?'（名前のみの記録。同名者の区別は未確定）':'')+'の成績\n半荘数 '+r.count+' / 平均順位 '+r.avgRank.toFixed(2)+
   '\n平均持ち点 '+Math.round(r.avgPoints).toLocaleString('ja-JP')+'点'+
   '\n順位回数：1位 '+r.ranks[0]+' / 2位 '+r.ranks[1]+' / 3位 '+r.ranks[2]+' / 4位 '+r.ranks[3]+
   '\n記録局数 '+r.hands+' / 和了 '+r.wins+'（'+ratio(r.wins,r.hands)+'）'+
@@ -408,7 +432,7 @@ function renderSharedStatsDetail(){
 }
 async function loadSharedStats(){
  if(sharedStatsBusy||!client||!user||isAnonymousUser())return;
- if(!playerRegistryLoaded)return notify('プレイヤー管理用SQLを適用し、プレイヤー一覧を読み込んでください。');
+ // The registry SQL is optional for names-only test matches.
  const n=Number($('sharedStatsCount').value),mode=$('sharedStatsLimitMode').value;
  if(!Number.isSafeInteger(n)||n<1||n>10000)return notify('直近Nは1～10000の整数を指定してください。');
  sharedStatsBusy=true;$('applySharedStatsBtn').disabled=true;
@@ -439,7 +463,7 @@ async function loadSharedStats(){
    for(const snap of data||[]){
     const m=testMatchFromPayload(snap.payload);
     if(!m||m.status!=='完了'){incomplete++;continue}
-    if(!Array.isArray(m.playerIds)||m.playerIds.length!==4||new Set(m.playerIds).size!==4){legacy++;continue}
+    if(!validStatsIds(m))legacy++;
     const room=byRoom.get(String(snap.room_id));
     if(!room)continue;
     const date=statsDateOfRoom(room,m);
@@ -447,9 +471,9 @@ async function loadSharedStats(){
     matches.push({date,id:String(room.id),m});
    }
   }
-  const rows=sharedStatsOfMatches(matches,activePlayers(),mode,n);
+  const rows=sharedStatsOfMatches(matches,statsPlayers(matches,playerRegistry),mode,n);
   renderSharedStatsRows(rows,'対象：'+matches.length+'半荘（作成者の完了済み記録）'+
-   (legacy?' / ID未設定の旧半荘 '+legacy+'件は未集計':'')+
+   (legacy?' / 名前のみの記録 '+legacy+'件を別枠で集計':'')+
    (incomplete?' / 未完了など '+incomplete+'件は未集計':''));
  }catch(e){$('sharedStatsStatus').textContent='成績を取得できませんでした。';fail(e)}
  finally{sharedStatsBusy=false;$('applySharedStatsBtn').disabled=false}
