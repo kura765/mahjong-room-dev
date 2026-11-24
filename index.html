@@ -164,6 +164,8 @@ button.danger{background:#fff0f0;color:#aa2935}
 <div id="migrationDryRunBox" class="hide" style="margin-top:12px">
 <button type="button" id="runMigrationDryRunBtn">データ変換を試験する（保存・送信なし）</button>
 <pre id="migrationDryRunReport" class="readonly" role="status" style="white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px;margin-top:10px">未実行</pre>
+<button type="button" id="compareMigrationCloudBtn" class="ghost" style="margin-top:10px">クラウドの既存半荘と重複照合（読み取りのみ）</button>
+<pre id="migrationCloudReport" class="readonly" role="status" style="white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px;margin-top:10px">未実行。ログインした作成者のクラウド記録との照合です。</pre>
 </div>
 <pre id="migrationReport" class="readonly" role="status" style="white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px">バックアップを選択してください。</pre>
 <p class="muted" style="font-size:12px">安全のため、バックアップの個人名や対局内容は検査結果に表示しません。検査に成功してもまだクラウド移行は行いません。</p>
@@ -193,7 +195,7 @@ let sharedEditIndex=null,sharedEditRoom=null,handWriteBusy=false;
 let playerRegistry=[],playerRegistryLoaded=false;
 let sharedStatsRows=[],sharedStatsSelectedId=null,sharedStatsBusy=false;
 let matchNameModeRoom=null,matchNameModeIsManual=false;
-let migrationBackupInMemory=null;
+let migrationBackupInMemory=null,migrationCloudScanBusy=false;
 function show(id,on){$(id).classList.toggle('hide',!on)}
 function notify(msg){$('message').textContent=msg}
 function fail(e){notify(e?.message||String(e))}
@@ -607,6 +609,108 @@ function dryRunV22Conversion(data){
   keyCount:keys.size
  };
 }
+// Cloud inventory is read-only: never infer that an absent key proves an old
+// room is unrelated. It only establishes an unmarked, potentially ambiguous room.
+function cloudMigrationKey(snapshot){
+ const p=snapshot?.payload||{};
+ const key=p.migrationKey??p.sharedMatch?.migrationKey??p.migration?.sourceKey;
+ return typeof key==='string'&&key.startsWith('v22-match:')?key:null;
+}
+function migrationMatchSignature(m){
+ if(!m)return '';
+ // Only compare exact fields present in both the legacy source and cloud match.
+ // Never display names, points or raw content in a comparison report.
+ return JSON.stringify({
+  id:String(m.id??''),names:m.names,playerIds:m.playerIds||null,
+  points:m.points,hands:m.hands,round:m.round,dealer:m.dealer,
+  honba:m.honba,sticks:m.sticks,status:m.status
+ });
+}
+function compareMigrationInventory(dryRun,rooms,snapshots){
+ if(!dryRun?.ok)throw Error('変換候補に問題があるため、照合できません。');
+ const knownRooms=new Map(rooms.map(r=>[String(r.id),r]));
+ const snapshotByRoom=new Map();
+ for(const snap of snapshots){
+  const roomId=String(snap.room_id);
+  if(snapshotByRoom.has(roomId))throw Error('クラウド上で同じルームのスナップショットが重複しています。');
+  snapshotByRoom.set(roomId,snap);
+ }
+ const missing=rooms.filter(r=>!snapshotByRoom.has(String(r.id))).length;
+ if(missing)throw Error('スナップショットのないクラウドルームが'+missing+'件あり、照合を完了できません。');
+ const keyed=new Map(),unmarked=[];
+ for(const snap of snapshots){
+  if(!knownRooms.has(String(snap.room_id)))continue;
+  const key=cloudMigrationKey(snap),m=testMatchFromPayload(snap.payload);
+  if(key){if(!keyed.has(key))keyed.set(key,[]);keyed.get(key).push({snap,m});}
+  else unmarked.push({snap,m});
+ }
+ const results={new:[],imported:[],conflict:[],needsReview:[],counts:{local:dryRun.total,cloudRooms:rooms.length,marked:0,unmarked:unmarked.length}};
+ for(const matches of keyed.values())results.counts.marked+=matches.length;
+ for(const candidate of dryRun.candidates){
+  const key=candidate.migrationKey,marked=keyed.get(key)||[];
+  if(marked.length>1){results.conflict.push({key,reason:'重複した移行キーがクラウドに存在します'});continue}
+  if(marked.length===1){
+   const target=marked[0].m;
+   // Some early importers may omit fidelity-critical data. Treat those as review
+   // rather than claiming equivalence based on just the migration key.
+   if(target&&migrationMatchSignature(target)===migrationMatchSignature(candidate.match)){
+    results.imported.push(key);
+   }else results.conflict.push({key,reason:'同じ移行キーのデータが一致しません'});
+   continue;
+  }
+  // A non-marked room may be a manually created record or an older import.
+  // Source match ID collisions are suspicious, but do not prove equivalence.
+  const suspicious=unmarked.some(({m})=>m&&String(m.id)===String(candidate.match.id));
+  if(suspicious)results.needsReview.push(key);
+  else results.new.push(key);
+ }
+ return results;
+}
+function formatMigrationCloudReport(result){
+ return '既存クラウドとの照合完了（読み取りのみ）'+
+ '\nローカル変換候補：'+result.counts.local+'半荘 / クラウドルーム：'+result.counts.cloudRooms+'件'+
+ '\n移行キーあり：'+result.counts.marked+'件 / キーなし：'+result.counts.unmarked+'件'+
+ '\n未登録候補：'+result.new.length+'件 / 既に取り込み済みと一致：'+result.imported.length+'件'+
+ '\n同じキーで内容不一致など：'+result.conflict.length+'件 / 手動確認が必要：'+result.needsReview.length+'件'+
+ ((result.conflict.length||result.needsReview.length)?'\n※データの衝突・照合不能があるため、このバックアップの自動移行は停止すべきです。':'')+
+ '\n\n※「未登録候補」は移行済みでないことを保証しません。'+
+ '\n※まだ取り込み機能はありません。既存の対局データに一切書き込みません。';
+}
+async function readOwnerMigrationInventory(){
+ if(!client||!user||isAnonymousUser())throw Error('自分のアカウントでログインしてください。');
+ const roomRows=[];
+ for(let offset=0;offset<10000;offset+=200){
+  const {data,error}=await client.from('mahjong_rooms')
+   .select('id,owner_id').eq('owner_id',user.id).order('created_at',{ascending:true}).range(offset,offset+199);
+  if(error)throw error;
+  roomRows.push(...(data||[]));
+  if(!data||data.length<200)break;
+  if(offset+200>=10000)throw Error('ルームが取得上限の10000件に達しました。完全な重複照合ができません。');
+ }
+ const snaps=[];
+ for(let i=0;i<roomRows.length;i+=40){
+  const ids=roomRows.slice(i,i+40).map(r=>r.id);
+  const {data,error}=await client.from('mahjong_room_snapshots').select('room_id,payload').in('room_id',ids);
+  if(error)throw error;
+  snaps.push(...(data||[]));
+ }
+ return {rooms:roomRows,snapshots:snaps};
+}
+async function compareMigrationCloud(){
+ const out=$('migrationCloudReport');
+ if(migrationCloudScanBusy)return;
+ if(!migrationBackupInMemory){out.textContent='先にバックアップJSONを選択してください。';return}
+ migrationCloudScanBusy=true;$('compareMigrationCloudBtn').disabled=true;
+ out.textContent='クラウドを読み取って重複を確認中…（記録は変更しません）';
+ try{
+  const dryRun=dryRunV22Conversion(migrationBackupInMemory);
+  if(!dryRun.ok)throw Error('ローカル変換に問題があります。先に変換試験の結果を確認してください。');
+  const inventory=await readOwnerMigrationInventory();
+  const report=compareMigrationInventory(dryRun,inventory.rooms,inventory.snapshots);
+  out.textContent=formatMigrationCloudReport(report);
+ }catch(e){out.textContent='クラウド照合に失敗：'+(e?.message||String(e))}
+ finally{migrationCloudScanBusy=false;$('compareMigrationCloudBtn').disabled=false}
+}
 function formatMigrationDryRun(result){
  return (result.ok?'変換候補の作成に成功（クラウド移行は未実施）':'変換候補の作成に問題があります。')+
  '\n対象：'+result.total+'半荘 / 変換候補：'+result.ready+'半荘 / ブロック：'+result.blocked.length+'件'+
@@ -643,7 +747,7 @@ function formatMigrationReport(result){
 async function checkMigrationBackupFile(){
  const input=$('migrationBackupFile'),file=input.files?.[0];
  if(!file)return;
- migrationBackupInMemory=null;show('migrationDryRunBox',false);
+ migrationBackupInMemory=null;show('migrationDryRunBox',false);$('migrationCloudReport').textContent='未実行。ログインした作成者のクラウド記録との照合です。';
  const output=$('migrationReport');
  output.textContent='ローカルで検査しています…';
  try{
@@ -1242,8 +1346,9 @@ $('createRoomBtn').onclick=createRoom;
 $('registerPlayerBtn').onclick=registerPlayer;
 $('applySharedStatsBtn').onclick=loadSharedStats;
 $('migrationBackupFile').onchange=checkMigrationBackupFile;
-$('clearMigrationReportBtn').onclick=()=>{migrationBackupInMemory=null;show('migrationDryRunBox',false);$('migrationDryRunReport').textContent='未実行';$('migrationReport').textContent='バックアップを選択してください。';$('migrationBackupFile').value=''};
+$('clearMigrationReportBtn').onclick=()=>{migrationBackupInMemory=null;show('migrationDryRunBox',false);$('migrationDryRunReport').textContent='未実行';$('migrationCloudReport').textContent='未実行';$('migrationReport').textContent='バックアップを選択してください。';$('migrationBackupFile').value=''};
 $('runMigrationDryRunBtn').onclick=executeMigrationDryRun;
+$('compareMigrationCloudBtn').onclick=compareMigrationCloud;
 $('runDevChecksBtn').onclick=()=>{
  const result=runDevChecks();
  $('devChecksResult').textContent=result.message;
