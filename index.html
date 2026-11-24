@@ -426,7 +426,9 @@ function settlementPreview(m){
 
 function makeHandControls(){
  const m=testMatchFromPayload(lastSharedPayload);
- const root=$('handInputs');root.replaceChildren();
+ const root=$('handInputs');
+ const priorRiichi=[...root.querySelectorAll('input[name="handRiichi"]:checked')].map(el=>el.value);
+ root.replaceChildren();
  if(!m)return;
  const type=$('handType').value,html=[];
  if(type==='ron'||type==='tsumo'){
@@ -440,6 +442,7 @@ function makeHandControls(){
  if(type==='draw')html.push('<label>聴牌者</label><div class="select-tiles">'+m.names.map((n,i)=>'<label><input type="checkbox" name="handTenpai" value="'+i+'">'+escapeHtml(n)+'</label>').join('')+'</div>');
  html.push('<label>この局でリーチしたプレイヤー</label><div class="select-tiles">'+m.names.map((n,i)=>'<label><input type="checkbox" name="handRiichi" value="'+i+'">'+escapeHtml(n)+'</label>').join('')+'</div>');
  root.innerHTML=html.join('');
+ root.querySelectorAll('input[name="handRiichi"]').forEach(el=>el.checked=priorRiichi.includes(el.value));
 }
 function escapeHtml(v){return String(v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 function checks(name){return [...document.querySelectorAll('input[name="'+name+'"]:checked')].map(el=>Number(el.value))}
@@ -507,7 +510,8 @@ async function writeSharedInputs(transform,success){
   const {error:writeError}=await client.rpc('mahjong_write_snapshot',{
    p_room_id:id,p_expected_revision:data.revision,p_payload:{...data.payload,sharedMatch:updated}});
   if(writeError)throw writeError;
-  sharedEditIndex=null;sharedEditRoom=null;
+  sharedEditIndex=null;sharedEditRoom=null;sharedEditingOriginal=null;
+  $('commitSharedHandBtn').textContent='局を確定して共有保存';show('cancelHandEditBtn',false);
   $('handInputs').replaceChildren();$('handType').value='ron';
   document.querySelectorAll('input[name="handTypeChoice"]').forEach(el=>{el.checked=el.value==='ron'});
   await refresh();notify(success);
